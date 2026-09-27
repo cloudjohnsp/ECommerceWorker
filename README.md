@@ -2,6 +2,22 @@
 
 Worker .NET responsável por consumir eventos do ecossistema ECommerce no RabbitMQ.
 
+## Limites arquiteturais
+
+Este repositório é a implementação canônica e independente do Worker. Ele possui
+ciclo próprio de build, testes, imagem, versionamento e implantação; não deve ser
+incorporado à solução da API nem depender de projetos ou assemblies internos de
+`ECommerceApi`.
+
+A integração com a API ocorre somente por contratos de transporte explícitos e
+versionados, pelo PostgreSQL e pelo RabbitMQ. Entidades de domínio e casos de uso
+da API não são contratos. Pequenos DTOs de transporte podem ser representados
+localmente no Worker para preservar a independência entre os processos.
+
+O Worker ainda existente dentro do repositório `ECommerceApi` é transitório. Suas
+responsabilidades devem ser migradas incrementalmente para este projeto antes de
+sua remoção, sempre mantendo os contratos e testes compatíveis.
+
 ## Fluxo implementado
 
 O worker consome mensagens `order.created` da fila durável
