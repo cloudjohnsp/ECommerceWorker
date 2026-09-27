@@ -36,6 +36,7 @@ builder.Services.AddScoped<EmailSentIntegrationEventProcessor>();
 builder.Services.AddScoped<IntegrationEventProcessor>();
 builder.Services.AddScoped<NotificationOutboxProcessor>();
 builder.Services.AddScoped<WorkerIntegrationEventOutboxProcessor>();
+builder.Services.AddScoped<ApiOutboxPublisher>();
 
 builder.Services.AddOptions<WorkerRabbitMqOptions>()
     .Bind(builder.Configuration.GetSection(WorkerRabbitMqOptions.SectionName))
@@ -63,6 +64,14 @@ builder.Services.AddOptions<NotificationProcessorOptions>()
     .Validate(options => options.PollIntervalSeconds > 0, "NotificationProcessor:PollIntervalSeconds must be positive.")
     .Validate(options => options.LockSeconds > 0, "NotificationProcessor:LockSeconds must be positive.")
     .Validate(options => options.MaximumAttempts > 0, "NotificationProcessor:MaximumAttempts must be positive.")
+    .ValidateOnStart();
+builder.Services.AddOptions<ApiOutboxPublisherOptions>()
+    .Bind(builder.Configuration.GetSection(ApiOutboxPublisherOptions.SectionName))
+    .Validate(options => options.BatchSize > 0, "ApiOutboxPublisher:BatchSize must be positive.")
+    .Validate(options => options.PollIntervalSeconds > 0, "ApiOutboxPublisher:PollIntervalSeconds must be positive.")
+    .Validate(options => options.LockSeconds > 0, "ApiOutboxPublisher:LockSeconds must be positive.")
+    .Validate(options => options.MaximumAttempts > 0, "ApiOutboxPublisher:MaximumAttempts must be positive.")
+    .Validate(options => options.BaseRetryDelaySeconds > 0, "ApiOutboxPublisher:BaseRetryDelaySeconds must be positive.")
     .ValidateOnStart();
 builder.Services.AddOptions<WorkerObservabilityOptions>()
     .Bind(builder.Configuration.GetSection(WorkerObservabilityOptions.SectionName))
@@ -138,6 +147,11 @@ else
 
 builder.Services.AddHostedService<RabbitMqOrderConsumer>();
 builder.Services.AddHostedService<NotificationDispatcher>();
+var apiOutboxOptions = builder.Configuration
+    .GetSection(ApiOutboxPublisherOptions.SectionName)
+    .Get<ApiOutboxPublisherOptions>() ?? new ApiOutboxPublisherOptions();
+if (apiOutboxOptions.Enabled)
+    builder.Services.AddHostedService<ApiOutboxDispatcher>();
 
 var app = builder.Build();
 await app.Services.InitializeWorkerDatabaseAsync();

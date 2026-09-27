@@ -15,6 +15,7 @@ public sealed class WorkerDbContext(DbContextOptions<WorkerDbContext> options) :
     public DbSet<NotificationOutboxMessage> NotificationOutboxMessages => Set<NotificationOutboxMessage>();
     public DbSet<WorkerIntegrationOutboxMessage> IntegrationOutboxMessages =>
         Set<WorkerIntegrationOutboxMessage>();
+    public DbSet<ApiOutboxMessage> ApiOutboxMessages => Set<ApiOutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

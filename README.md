@@ -32,11 +32,21 @@ O processamento oferece:
 4. geração idempotente de nota fiscal simulada para pedidos pagos;
 5. Outbox durável de notificações, envio SMTP e Outbox de `email.sent`;
 6. ACK manual, fila quorum, retry limitado pelo delivery limit e DLQ;
-7. logs JSON, métricas Prometheus, traces OpenTelemetry e health checks.
+7. logs JSON, métricas Prometheus, traces OpenTelemetry e health checks;
+8. publicação da Outbox de integração da API com claim PostgreSQL concorrente,
+   lease, backoff e publisher confirms.
 
 Inbox, projeções, nota e intenção de notificação são confirmadas antes do ACK.
 Mensagens inválidas são rejeitadas para a DLQ; falhas transitórias são
 reenfileiradas até o limite configurado pelo RabbitMQ.
+
+Quando `ApiOutboxPublisher:Enabled=true`, o Worker deve usar o mesmo banco da
+API. Ele lê somente os tipos de evento de integração da tabela pública
+`OutboxMessages`; intenções locais de pagamento e e-mail continuam sob
+responsabilidade da API. O claim usa `FOR UPDATE SKIP LOCKED`, mas nenhum lock de
+banco permanece aberto durante a publicação no RabbitMQ. A entrega é
+*at least once*, portanto os consumidores continuam deduplicando por
+`MessageId`.
 
 ## Executar com Docker
 
