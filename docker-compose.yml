@@ -34,13 +34,19 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      ConnectionStrings__WorkerDatabase: Host=worker-db;Port=5432;Database=ecommerce_worker;Username=postgres;Password=postgres
       RabbitMq__HostName: rabbitmq
       RabbitMq__Port: 5672
       RabbitMq__UserName: guest
       RabbitMq__Password: guest
       RabbitMq__VirtualHost: /
       RabbitMq__ExchangeName: ecommerce.events
-      Postgres__ConnectionString: Host=worker-db;Port=5432;Database=ecommerce_worker;Username=postgres;Password=postgres
+      RabbitMq__QueueName: ecommerce.worker.orders
+      RabbitMq__DeadLetterExchangeName: ecommerce.events.dlx
+      RabbitMq__DeadLetterQueueName: ecommerce.worker.orders.dead
+      Email__Enabled: "false"
+    ports:
+      - "8082:8080"
     depends_on:
       worker-db:
         condition: service_healthy

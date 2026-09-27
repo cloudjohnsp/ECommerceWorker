@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-and-image:
+    name: Build, test and image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore ECommerceWorker.slnx
+
+      - name: Verify formatting
+        run: dotnet format ECommerceWorker.slnx --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build ECommerceWorker.slnx --configuration Release --no-restore
+
+      - name: Test with PostgreSQL
+        run: dotnet test ECommerceWorker.slnx --configuration Release --no-build --no-restore
+        env:
+          RUN_POSTGRES_INTEGRATION_TESTS: true
+
+      - name: Build container image
+        run: docker build --tag ecommerce-worker:ci .

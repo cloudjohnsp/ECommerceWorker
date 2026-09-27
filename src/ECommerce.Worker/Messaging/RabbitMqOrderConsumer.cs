@@ -1,7 +1,10 @@
+using System.Diagnostics;
+using System.Text;
+using ECommerce.Worker.Contracts;
+using ECommerce.Worker.Observability;
 using ECommerce.Worker.Options;
+using ECommerce.Worker.Processing;
 using Microsoft.Extensions.Options;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -9,22 +12,19 @@ namespace ECommerce.Worker.Messaging;
 
 public sealed class RabbitMqOrderConsumer(
     ConnectionFactory connectionFactory,
-    IOptions<RabbitMqOptions> options,
-    IProcessedMessageStore processedMessageStore,
-    OrderCreatedMessageProcessor processor,
+    IServiceScopeFactory scopeFactory,
+    IOptions<WorkerRabbitMqOptions> options,
     ILogger<RabbitMqOrderConsumer> logger) : BackgroundService
 {
-    private readonly RabbitMqOptions _options = options.Value;
+    private readonly WorkerRabbitMqOptions _options = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await InitializeStoreWithRetryAsync(stoppingToken);
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ConsumeAsync(stoppingToken);
+                await ConsumeUntilDisconnectedAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -32,84 +32,131 @@ public sealed class RabbitMqOrderConsumer(
             }
             catch (Exception exception)
             {
-                logger.LogError(
-                    exception,
-                    "RabbitMQ consumer stopped unexpectedly. Reconnecting in {DelaySeconds} seconds.",
-                    _options.ReconnectDelaySeconds);
-                await Task.Delay(TimeSpan.FromSeconds(_options.ReconnectDelaySeconds), stoppingToken);
+                logger.LogError(exception, "RabbitMQ consumer disconnected; reconnecting.");
+                await Task.Delay(
+                    TimeSpan.FromSeconds(_options.ReconnectDelaySeconds),
+                    stoppingToken);
             }
         }
     }
 
-    private async Task ConsumeAsync(CancellationToken stoppingToken)
+    private async Task ConsumeUntilDisconnectedAsync(CancellationToken stoppingToken)
     {
         await using var connection = await connectionFactory.CreateConnectionAsync(stoppingToken);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
-
         await DeclareTopologyAsync(channel, stoppingToken);
-        await channel.BasicQosAsync(0, _options.PrefetchCount, global: false, stoppingToken);
+        await channel.BasicQosAsync(0, 1, false, stoppingToken);
+
+        var disconnected = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.ConnectionShutdownAsync += (_, _) =>
+        {
+            disconnected.TrySetResult();
+            return Task.CompletedTask;
+        };
 
         var consumer = new AsyncEventingBasicConsumer(channel);
-        consumer.ReceivedAsync += async (_, eventArgs) =>
-        {
-            await HandleDeliveryAsync(channel, eventArgs, stoppingToken);
-        };
+        consumer.ReceivedAsync += async (_, delivery) =>
+            await HandleDeliveryAsync(channel, delivery, stoppingToken);
         await channel.BasicConsumeAsync(
             _options.QueueName,
             autoAck: false,
             consumer,
             stoppingToken);
 
-        logger.LogInformation(
-            "Listening to queue {QueueName} on exchange {ExchangeName}.",
-            _options.QueueName,
-            _options.ExchangeName);
-        await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
+        logger.LogInformation("Consuming RabbitMQ queue {QueueName}.", _options.QueueName);
+        var cancelled = Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
+        await Task.WhenAny(disconnected.Task, cancelled);
+        stoppingToken.ThrowIfCancellationRequested();
+        throw new InvalidOperationException("RabbitMQ connection was closed.");
     }
 
     private async Task HandleDeliveryAsync(
         IChannel channel,
-        BasicDeliverEventArgs eventArgs,
+        BasicDeliverEventArgs delivery,
         CancellationToken stoppingToken)
     {
-        if (!Guid.TryParse(eventArgs.BasicProperties.MessageId, out var messageId))
-        {
-            logger.LogWarning("Rejecting RabbitMQ message without a valid MessageId.");
-            await channel.BasicRejectAsync(eventArgs.DeliveryTag, requeue: false, stoppingToken);
-            return;
-        }
+        using var activity = WorkerTelemetry.ActivitySource.StartActivity(
+            "rabbitmq.consume",
+            ActivityKind.Consumer);
+        activity?.SetTag("messaging.system", "rabbitmq");
+        activity?.SetTag("messaging.destination.name", _options.QueueName);
+        activity?.SetTag("messaging.message.id", delivery.BasicProperties.MessageId);
+        activity?.SetTag("messaging.event.type", delivery.BasicProperties.Type);
 
         try
         {
-            var eventType = eventArgs.BasicProperties.Type ?? eventArgs.RoutingKey;
+            if (!Guid.TryParse(delivery.BasicProperties.MessageId, out var messageId))
+                throw new InvalidIntegrationEventException("RabbitMQ MessageId must be a GUID.");
+            if (string.IsNullOrWhiteSpace(delivery.BasicProperties.Type))
+                throw new InvalidIntegrationEventException("RabbitMQ event type is required.");
+            var contractVersion = GetContractVersion(delivery.BasicProperties.Headers);
+            if (!IntegrationEventContract.IsSupportedVersion(contractVersion))
+                throw new InvalidIntegrationEventException(
+                    $"Unsupported integration event contract version '{contractVersion}'.");
+
+            using var scope = scopeFactory.CreateScope();
+            var processor = scope.ServiceProvider.GetRequiredService<IntegrationEventProcessor>();
             var result = await processor.ProcessAsync(
                 messageId,
-                eventType,
-                eventArgs.Body,
+                delivery.BasicProperties.Type,
+                delivery.Body,
                 stoppingToken);
-
-            if (result == MessageProcessingResult.Invalid)
-            {
-                logger.LogWarning("Rejecting invalid event {MessageId} of type {EventType}.", messageId, eventType);
-                await channel.BasicRejectAsync(eventArgs.DeliveryTag, requeue: false, stoppingToken);
-                return;
-            }
-
-            await channel.BasicAckAsync(eventArgs.DeliveryTag, multiple: false, stoppingToken);
-            logger.LogInformation(
-                result == MessageProcessingResult.Duplicate
-                    ? "Acknowledged duplicate event {MessageId}."
-                    : "Processed event {MessageId}.",
-                messageId);
+            var eventTypeTag = new KeyValuePair<string, object?>(
+                "messaging.event.type",
+                delivery.BasicProperties.Type);
+            if (result == IntegrationEventProcessingResult.AlreadyProcessed)
+                WorkerTelemetry.DuplicateEvents.Add(1, eventTypeTag);
+            else
+                WorkerTelemetry.ConsumedEvents.Add(1, eventTypeTag);
+            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, stoppingToken);
+        }
+        catch (InvalidIntegrationEventException exception)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, exception.Message);
+            WorkerTelemetry.FailedEvents.Add(
+                1,
+                new KeyValuePair<string, object?>("failure.kind", "invalid"));
+            logger.LogWarning(
+                exception,
+                "Rejecting invalid integration event {MessageId}.",
+                delivery.BasicProperties.MessageId);
+            await channel.BasicRejectAsync(delivery.DeliveryTag, requeue: false, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+            if (channel.IsOpen)
+                await channel.BasicNackAsync(delivery.DeliveryTag, false, true, CancellationToken.None);
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Failed to process event {MessageId}; message will be retried.", messageId);
-            await channel.BasicNackAsync(eventArgs.DeliveryTag, multiple: false, requeue: true, stoppingToken);
+            activity?.SetStatus(ActivityStatusCode.Error, exception.Message);
+            WorkerTelemetry.FailedEvents.Add(
+                1,
+                new KeyValuePair<string, object?>("failure.kind", "transient"));
+            logger.LogWarning(
+                exception,
+                "Integration event {MessageId} failed and will be retried.",
+                delivery.BasicProperties.MessageId);
+            await Task.Delay(TimeSpan.FromSeconds(_options.RetryDelaySeconds), stoppingToken);
+            await channel.BasicNackAsync(delivery.DeliveryTag, multiple: false, requeue: true, stoppingToken);
         }
+    }
+
+    private static string? GetContractVersion(IDictionary<string, object?>? headers)
+    {
+        if (headers is null ||
+            !headers.TryGetValue(IntegrationEventContract.VersionHeaderName, out var value) ||
+            value is null)
+            return null;
+
+        return value switch
+        {
+            byte[] bytes => Encoding.UTF8.GetString(bytes),
+            ReadOnlyMemory<byte> bytes => Encoding.UTF8.GetString(bytes.Span),
+            string text => text,
+            _ => value.ToString()
+        };
     }
 
     private async Task DeclareTopologyAsync(IChannel channel, CancellationToken cancellationToken)
@@ -119,18 +166,35 @@ public sealed class RabbitMqOrderConsumer(
             ExchangeType.Topic,
             durable: true,
             autoDelete: false,
-            arguments: null,
             cancellationToken: cancellationToken);
         await channel.ExchangeDeclareAsync(
             _options.DeadLetterExchangeName,
-            ExchangeType.Fanout,
+            ExchangeType.Topic,
             durable: true,
             autoDelete: false,
-            arguments: null,
+            cancellationToken: cancellationToken);
+
+        var deadQueueArguments = new Dictionary<string, object?>
+        {
+            ["x-queue-type"] = "quorum"
+        };
+        await channel.QueueDeclareAsync(
+            _options.DeadLetterQueueName,
+            durable: true,
+            exclusive: false,
+            autoDelete: false,
+            arguments: deadQueueArguments,
+            cancellationToken: cancellationToken);
+        await channel.QueueBindAsync(
+            _options.DeadLetterQueueName,
+            _options.DeadLetterExchangeName,
+            "#",
             cancellationToken: cancellationToken);
 
         var queueArguments = new Dictionary<string, object?>
         {
+            ["x-queue-type"] = "quorum",
+            ["x-delivery-limit"] = _options.DeliveryLimit,
             ["x-dead-letter-exchange"] = _options.DeadLetterExchangeName
         };
         await channel.QueueDeclareAsync(
@@ -143,42 +207,22 @@ public sealed class RabbitMqOrderConsumer(
         await channel.QueueBindAsync(
             _options.QueueName,
             _options.ExchangeName,
-            "order.created",
-            arguments: null,
-            cancellationToken: cancellationToken);
-
-        await channel.QueueDeclareAsync(
-            _options.DeadLetterQueueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: null,
+            "order.*",
             cancellationToken: cancellationToken);
         await channel.QueueBindAsync(
-            _options.DeadLetterQueueName,
-            _options.DeadLetterExchangeName,
-            routingKey: string.Empty,
-            arguments: null,
+            _options.QueueName,
+            _options.ExchangeName,
+            IntegrationEventTypes.PaymentFailed,
             cancellationToken: cancellationToken);
-    }
-
-    private async Task InitializeStoreWithRetryAsync(CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            try
-            {
-                await processedMessageStore.InitializeAsync(cancellationToken);
-                return;
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogError(
-                    exception,
-                    "Inbox database is unavailable. Retrying in {DelaySeconds} seconds.",
-                    _options.ReconnectDelaySeconds);
-                await Task.Delay(TimeSpan.FromSeconds(_options.ReconnectDelaySeconds), cancellationToken);
-            }
-        }
+        await channel.QueueBindAsync(
+            _options.QueueName,
+            _options.ExchangeName,
+            StockIntegrationEventProcessor.EventType,
+            cancellationToken: cancellationToken);
+        await channel.QueueBindAsync(
+            _options.QueueName,
+            _options.ExchangeName,
+            EmailSentIntegrationEventProcessor.EventType,
+            cancellationToken: cancellationToken);
     }
 }

@@ -14,27 +14,29 @@ versionados, pelo PostgreSQL e pelo RabbitMQ. Entidades de domínio e casos de u
 da API não são contratos. Pequenos DTOs de transporte podem ser representados
 localmente no Worker para preservar a independência entre os processos.
 
-O Worker ainda existente dentro do repositório `ECommerceApi` é transitório. Suas
-responsabilidades devem ser migradas incrementalmente para este projeto antes de
-sua remoção, sempre mantendo os contratos e testes compatíveis.
+O antigo Worker interno do repositório `ECommerceApi` foi migrado e removido após
+validação dos contratos, testes e execução da imagem independente.
 
 ## Fluxo implementado
 
-O worker consome mensagens `order.created` da fila durável
-`ecommerce.worker.orders`, vinculada ao exchange tópico `ecommerce.events`.
+O Worker consome eventos de pedido, pagamento, estoque e entrega de e-mail da
+fila quorum durável `ecommerce.worker.orders`, vinculada ao exchange tópico
+`ecommerce.events`.
 
-Para cada pedido criado ele:
+O processamento oferece:
 
-1. valida o identificador e o payload da mensagem;
-2. consulta a inbox PostgreSQL para eliminar mensagens já processadas;
-3. simula o envio do e-mail de confirmação e a geração da nota fiscal;
-4. registra o `MessageId` como processado;
-5. confirma a mensagem manualmente no RabbitMQ.
+1. contratos locais v1 documentados em
+   [`docs/integration-events-v1.md`](docs/integration-events-v1.md);
+2. Inbox PostgreSQL e advisory lock por `MessageId` para idempotência concorrente;
+3. projeções locais de pedidos, estoque disponível e entregas de e-mail;
+4. geração idempotente de nota fiscal simulada para pedidos pagos;
+5. Outbox durável de notificações, envio SMTP e Outbox de `email.sent`;
+6. ACK manual, fila quorum, retry limitado pelo delivery limit e DLQ;
+7. logs JSON, métricas Prometheus, traces OpenTelemetry e health checks.
 
-Mensagens inválidas seguem para `ecommerce.worker.orders.dead-letter`. Falhas
-transitórias são reenfileiradas. Como os efeitos são processados com semântica
-*at-least-once*, handlers reais de e-mail e nota fiscal também devem ser
-idempotentes.
+Inbox, projeções, nota e intenção de notificação são confirmadas antes do ACK.
+Mensagens inválidas são rejeitadas para a DLQ; falhas transitórias são
+reenfileiradas até o limite configurado pelo RabbitMQ.
 
 ## Executar com Docker
 
@@ -43,7 +45,8 @@ docker compose up --build
 ```
 
 O compose expõe o RabbitMQ em `localhost:5673`, a interface de administração em
-`http://localhost:15673` e o PostgreSQL em `localhost:5434`.
+`http://localhost:15673`, o PostgreSQL em `localhost:5434`, health checks em
+`http://localhost:8082/health` e métricas em `http://localhost:8082/metrics`.
 
 Para consumir os eventos da ECommerce API, ambos os projetos devem apontar para
 o mesmo RabbitMQ e usar o exchange `ecommerce.events`.
@@ -52,11 +55,34 @@ o mesmo RabbitMQ e usar o exchange `ecommerce.events`.
 
 ```bash
 dotnet restore ECommerceWorker.slnx
+dotnet user-secrets set "ConnectionStrings:WorkerDatabase" \
+  "Host=localhost;Port=5432;Database=ecommerce;Username=postgres;Password=<password>" \
+  --project src/ECommerce.Worker
+dotnet user-secrets set "RabbitMq:UserName" "ecommerce" \
+  --project src/ECommerce.Worker
+dotnet user-secrets set "RabbitMq:Password" "<password>" \
+  --project src/ECommerce.Worker
 dotnet run --project src/ECommerce.Worker
 ```
+
+Endpoints operacionais:
+
+- `/health/live`: processo iniciado;
+- `/health/ready`: PostgreSQL e RabbitMQ disponíveis;
+- `/metrics`: métricas Prometheus, quando habilitadas.
+
+Para operações EF que precisam conectar ao banco, configure
+`ECOMMERCE_WORKER_DESIGN_TIME_CONNECTION_STRING`. A factory não contém senha
+embutida.
 
 ## Testes
 
 ```bash
 dotnet test ECommerceWorker.slnx
+```
+
+Para executar também as integrações com PostgreSQL efêmero via Testcontainers:
+
+```bash
+RUN_POSTGRES_INTEGRATION_TESTS=true dotnet test ECommerceWorker.slnx
 ```
