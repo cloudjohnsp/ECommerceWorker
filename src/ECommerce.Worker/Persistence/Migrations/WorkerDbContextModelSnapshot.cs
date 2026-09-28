@@ -23,6 +23,31 @@ namespace ECommerce.Worker.Persistence.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("ECommerce.Worker.Persistence.Entities.AnalyticsEvent", b =>
+                {
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CorrelationId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("MessageId");
+
+                    b.HasIndex("EventType", "OccurredAt");
+
+                    b.ToTable("analytics_events", "worker");
+                });
+
             modelBuilder.Entity("ECommerce.Worker.Persistence.Entities.ApiOutboxMessage", b =>
                 {
                     b.Property<Guid>("Id")

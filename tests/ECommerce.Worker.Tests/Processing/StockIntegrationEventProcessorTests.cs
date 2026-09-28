@@ -29,6 +29,8 @@ public sealed class StockIntegrationEventProcessorTests
         projection.LastOrderId.Should().Be(payload.OrderId);
         projection.LastReason.Should().Be(StockUpdateReasons.Reserved);
         (await context.ConsumedIntegrationEvents.SingleAsync()).MessageId.Should().Be(messageId);
+        (await context.AnalyticsEvents.SingleAsync()).EventType
+            .Should().Be(IntegrationEventTypes.StockUpdated);
     }
 
     [Fact]
@@ -49,6 +51,7 @@ public sealed class StockIntegrationEventProcessorTests
         result.Should().Be(IntegrationEventProcessingResult.AlreadyProcessed);
         (await context.InventoryProjections.CountAsync()).Should().Be(1);
         (await context.ConsumedIntegrationEvents.CountAsync()).Should().Be(1);
+        (await context.AnalyticsEvents.CountAsync()).Should().Be(1);
     }
 
     [Fact]

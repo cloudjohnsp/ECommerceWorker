@@ -15,6 +15,10 @@ public static class WorkerTelemetry
         "ecommerce.worker.events.duplicate");
     public static readonly Counter<long> FailedEvents = Meter.CreateCounter<long>(
         "ecommerce.worker.events.failed");
+    public static readonly Counter<long> RetriedEvents = Meter.CreateCounter<long>(
+        "ecommerce.worker.events.retried");
+    public static readonly Counter<long> DeadLetteredEvents = Meter.CreateCounter<long>(
+        "ecommerce.worker.events.dead_lettered");
     public static readonly Counter<long> SentNotifications = Meter.CreateCounter<long>(
         "ecommerce.worker.notifications.sent");
     public static readonly Counter<long> FailedNotifications = Meter.CreateCounter<long>(

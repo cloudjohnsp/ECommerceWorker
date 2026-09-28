@@ -42,8 +42,12 @@ services:
       RabbitMq__VirtualHost: /
       RabbitMq__ExchangeName: ecommerce.events
       RabbitMq__QueueName: ecommerce.worker.orders
+      RabbitMq__RetryExchangeName: ecommerce.events.retry
+      RabbitMq__RetryQueueName: ecommerce.worker.orders.retry
       RabbitMq__DeadLetterExchangeName: ecommerce.events.dlx
       RabbitMq__DeadLetterQueueName: ecommerce.worker.orders.dead
+      RabbitMq__MaximumRetryAttempts: 3
+      RabbitMq__RetryDelaySeconds: 15
       Email__Enabled: "false"
     ports:
       - "8082:8080"

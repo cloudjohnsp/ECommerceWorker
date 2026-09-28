@@ -28,6 +28,8 @@ public sealed class EmailSentIntegrationEventProcessorTests
         projection.Category.Should().Be(payload.Category);
         projection.SentAt.Should().Be(payload.OccurredAt);
         (await context.ConsumedIntegrationEvents.SingleAsync()).MessageId.Should().Be(messageId);
+        (await context.AnalyticsEvents.SingleAsync()).EventType
+            .Should().Be(IntegrationEventTypes.EmailSent);
     }
 
     [Fact]
@@ -48,6 +50,7 @@ public sealed class EmailSentIntegrationEventProcessorTests
         result.Should().Be(IntegrationEventProcessingResult.AlreadyProcessed);
         (await context.EmailDeliveryProjections.CountAsync()).Should().Be(1);
         (await context.ConsumedIntegrationEvents.CountAsync()).Should().Be(1);
+        (await context.AnalyticsEvents.CountAsync()).Should().Be(1);
     }
 
     [Fact]

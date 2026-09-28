@@ -28,6 +28,9 @@ public sealed class OrderIntegrationEventProcessorTests
         projection.CustomerEmail.Should().Be("customer@example.com");
         (await context.ConsumedIntegrationEvents.SingleAsync()).MessageId.Should().Be(messageId);
         (await context.NotificationOutboxMessages.SingleAsync()).SourceMessageId.Should().Be(messageId);
+        var analytics = await context.AnalyticsEvents.SingleAsync();
+        analytics.MessageId.Should().Be(messageId);
+        analytics.EventType.Should().Be(IntegrationEventTypes.OrderCreated);
     }
 
     [Fact]
@@ -44,6 +47,7 @@ public sealed class OrderIntegrationEventProcessorTests
         result.Should().Be(IntegrationEventProcessingResult.AlreadyProcessed);
         (await context.OrderProjections.CountAsync()).Should().Be(1);
         (await context.NotificationOutboxMessages.CountAsync()).Should().Be(1);
+        (await context.AnalyticsEvents.CountAsync()).Should().Be(1);
     }
 
     [Fact]
@@ -72,6 +76,44 @@ public sealed class OrderIntegrationEventProcessorTests
         invoice.OrderId.Should().Be(created.OrderId);
         invoice.Amount.Should().Be(created.Total);
         (await context.NotificationOutboxMessages.CountAsync()).Should().Be(2);
+        (await context.AnalyticsEvents.CountAsync(x =>
+            x.EventType == IntegrationEventTypes.OrderPaid)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task OrderCancelled_AfterOrderCreated_IsRecordedOnceForNotificationsAndAnalytics()
+    {
+        await using var context = CreateContext();
+        var processor = new OrderIntegrationEventProcessor(context);
+        var created = CreatePayload("Pending", "customer@example.com");
+        await processor.ProcessAsync(
+            Guid.NewGuid(),
+            IntegrationEventTypes.OrderCreated,
+            JsonSerializer.SerializeToUtf8Bytes(created));
+        var cancellationMessageId = Guid.NewGuid();
+        var cancelled = created with
+        {
+            CustomerEmail = null,
+            Status = "Cancelled",
+            CancellationReason = "customer_request",
+            OccurredAt = created.OccurredAt.AddMinutes(1)
+        };
+        var body = JsonSerializer.SerializeToUtf8Bytes(cancelled);
+
+        await processor.ProcessAsync(
+            cancellationMessageId,
+            IntegrationEventTypes.OrderCancelled,
+            body);
+        var replay = await processor.ProcessAsync(
+            cancellationMessageId,
+            IntegrationEventTypes.OrderCancelled,
+            body);
+
+        replay.Should().Be(IntegrationEventProcessingResult.AlreadyProcessed);
+        (await context.NotificationOutboxMessages.CountAsync()).Should().Be(2);
+        var analytics = await context.AnalyticsEvents.SingleAsync(x =>
+            x.EventType == IntegrationEventTypes.OrderCancelled);
+        analytics.MessageId.Should().Be(cancellationMessageId);
     }
 
     [Fact]

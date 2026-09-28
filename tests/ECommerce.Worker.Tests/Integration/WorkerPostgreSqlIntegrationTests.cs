@@ -16,6 +16,66 @@ namespace ECommerce.Worker.Tests.Integration;
 public sealed class WorkerPostgreSqlIntegrationTests
 {
     [WorkerPostgreSqlIntegrationFact]
+    public async Task ConcurrentRedelivery_PersistsEachEffectExactlyOnce()
+    {
+        await using var container = new PostgreSqlBuilder("postgres:18.6-alpine3.23")
+            .WithDatabase("ecommerce_worker_redelivery_tests")
+            .WithUsername("postgres")
+            .WithPassword("postgres")
+            .Build();
+        await container.StartAsync();
+        var options = new DbContextOptionsBuilder<WorkerDbContext>()
+            .UseNpgsql(container.GetConnectionString(), npgsql =>
+                npgsql.MigrationsHistoryTable("__EFMigrationsHistory", WorkerDbContext.SchemaName))
+            .Options;
+        await using (var migrationContext = new WorkerDbContext(options))
+            await migrationContext.Database.MigrateAsync();
+
+        var messageId = Guid.NewGuid();
+        var payload = new OrderIntegrationEventPayload(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "customer@example.com",
+            "Pending",
+            49.90m,
+            DateTimeOffset.UtcNow.AddMinutes(30),
+            null,
+            DateTimeOffset.UtcNow,
+            [new OrderIntegrationEventItem(Guid.NewGuid(), "Product", 49.90m, 1, 49.90m)]);
+        var body = JsonSerializer.SerializeToUtf8Bytes(payload);
+
+        var first = Task.Run(async () =>
+        {
+            await using var context = new WorkerDbContext(options);
+            return await new OrderIntegrationEventProcessor(context).ProcessAsync(
+                messageId,
+                IntegrationEventTypes.OrderCreated,
+                body);
+        });
+        var second = Task.Run(async () =>
+        {
+            await using var context = new WorkerDbContext(options);
+            return await new OrderIntegrationEventProcessor(context).ProcessAsync(
+                messageId,
+                IntegrationEventTypes.OrderCreated,
+                body);
+        });
+
+        var results = await Task.WhenAll(first, second);
+
+        results.Should().BeEquivalentTo(
+            [
+                IntegrationEventProcessingResult.Processed,
+                IntegrationEventProcessingResult.AlreadyProcessed
+            ]);
+        await using var assertionContext = new WorkerDbContext(options);
+        (await assertionContext.ConsumedIntegrationEvents.CountAsync()).Should().Be(1);
+        (await assertionContext.OrderProjections.CountAsync()).Should().Be(1);
+        (await assertionContext.NotificationOutboxMessages.CountAsync()).Should().Be(1);
+        (await assertionContext.AnalyticsEvents.CountAsync()).Should().Be(1);
+    }
+
+    [WorkerPostgreSqlIntegrationFact]
     public async Task InboxMessageLock_SerializesConcurrentConsumers()
     {
         await using var container = new PostgreSqlBuilder("postgres:18.6-alpine3.23")
@@ -149,6 +209,7 @@ public sealed class WorkerPostgreSqlIntegrationTests
         eventPublisher.Events.Should().HaveCount(2);
         (await context.EmailDeliveryProjections.CountAsync()).Should().Be(2);
         (await context.Invoices.CountAsync()).Should().Be(1);
+        (await context.AnalyticsEvents.CountAsync()).Should().Be(5);
         (await context.InventoryProjections.SingleAsync()).AvailableStock.Should().Be(9);
 
         await using var connection = new NpgsqlConnection(container.GetConnectionString());
@@ -156,7 +217,7 @@ public sealed class WorkerPostgreSqlIntegrationTests
         await using var command = new NpgsqlCommand(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'worker';",
             connection);
-        Convert.ToInt32(await command.ExecuteScalarAsync()).Should().BeGreaterThanOrEqualTo(7);
+        Convert.ToInt32(await command.ExecuteScalarAsync()).Should().BeGreaterThanOrEqualTo(8);
     }
 
     private sealed class RecordingOrderEmailSender : IOrderEmailSender

@@ -8,6 +8,7 @@ public sealed class WorkerDbContext(DbContextOptions<WorkerDbContext> options) :
     public const string SchemaName = "worker";
 
     public DbSet<ConsumedIntegrationEvent> ConsumedIntegrationEvents => Set<ConsumedIntegrationEvent>();
+    public DbSet<AnalyticsEvent> AnalyticsEvents => Set<AnalyticsEvent>();
     public DbSet<OrderProjection> OrderProjections => Set<OrderProjection>();
     public DbSet<InventoryProjection> InventoryProjections => Set<InventoryProjection>();
     public DbSet<EmailDeliveryProjection> EmailDeliveryProjections => Set<EmailDeliveryProjection>();

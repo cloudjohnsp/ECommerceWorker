@@ -31,9 +31,12 @@ O processamento oferece:
 3. projeções locais de pedidos, estoque disponível e entregas de e-mail;
 4. geração idempotente de nota fiscal simulada para pedidos pagos;
 5. Outbox durável de notificações, envio SMTP e Outbox de `email.sent`;
-6. ACK manual, fila quorum, retry limitado pelo delivery limit e DLQ;
-7. logs JSON, métricas Prometheus, traces OpenTelemetry e health checks;
-8. publicação da Outbox de integração da API com claim PostgreSQL concorrente,
+6. ACK manual, fila quorum, retry explícito com atraso e número máximo de
+   tentativas, seguido de DLQ durável;
+7. analytics simulada, idempotente por `MessageId`, gravada junto com Inbox e
+   efeitos locais;
+8. logs JSON, métricas Prometheus, traces OpenTelemetry e health checks;
+9. publicação da Outbox de integração da API com claim PostgreSQL concorrente,
    lease, backoff e publisher confirms.
 
 Todo evento novo usa o envelope v1 com `messageId`, `eventType`, `version`,
@@ -43,8 +46,19 @@ compatibilidade legada e evolução estão em
 [`docs/integration-events-v1.md`](docs/integration-events-v1.md).
 
 Inbox, projeções, nota e intenção de notificação são confirmadas antes do ACK.
-Mensagens inválidas são rejeitadas para a DLQ; falhas transitórias são
-reenfileiradas até o limite configurado pelo RabbitMQ.
+Mensagens inválidas são republicadas na DLQ com motivo sanitizado. Falhas
+transitórias passam pelo exchange/fila de retry, aguardam
+`RabbitMq:RetryDelaySeconds` e retornam à fila principal. Após
+`RabbitMq:MaximumRetryAttempts`, a mensagem segue para a DLQ preservando corpo,
+`MessageId`, tipo, versão, correlação, routing key original e número de
+tentativas. O procedimento seguro de inspeção e replay está em
+[`docs/dlq-runbook.md`](docs/dlq-runbook.md).
+
+As métricas `ecommerce.worker.events.retried` e
+`ecommerce.worker.events.dead_lettered` permitem alertar sobre degradação e
+poison messages. O `x-delivery-limit` da fila quorum permanece como proteção de
+último recurso caso a republicação confirmada falhe e a entrega original precise
+ser reenfileirada.
 
 Quando `ApiOutboxPublisher:Enabled=true`, o Worker deve usar o mesmo banco da
 API. Ele lê somente os tipos de evento de integração da tabela pública

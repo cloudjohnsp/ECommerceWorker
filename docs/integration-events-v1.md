@@ -40,3 +40,23 @@ Esta versão é imutável. Campos novos compatíveis devem ser opcionais e
 consumers ignoram campos desconhecidos. Mudança incompatível cria uma nova
 versão e exige período explícito de publicação/consumo simultâneos antes da
 retirada da versão anterior.
+
+## Semântica de entrega, Inbox e DLQ
+
+A entrega é *at least once*. O Worker usa `messageId` como chave primária da
+Inbox e adquire um advisory lock transacional antes dos efeitos. Inbox,
+projeções, invoice, analytics e intenções de notificação são confirmadas na
+mesma transação; uma redelivery já concluída recebe ACK sem repetir efeitos.
+
+O header `x-retry-count` registra tentativas transitórias. O retry é republicado
+com publisher confirm no exchange `ecommerce.events.retry`, aguarda o TTL da
+fila `ecommerce.worker.orders.retry` e retorna ao exchange principal com o mesmo
+`messageId`. Eventos inválidos usam diretamente a DLQ; eventos transitórios usam
+a DLQ depois do limite configurado.
+
+A mensagem na DLQ preserva envelope e propriedades AMQP originais e acrescenta
+apenas metadados operacionais: `x-failure-reason` (`invalid_event` ou
+`retry_exhausted`), `x-retry-count`, `x-original-exchange`,
+`x-original-routing-key` e `x-dead-lettered-at`. Detalhes de exceção não são
+copiados para headers. Consulte [`dlq-runbook.md`](dlq-runbook.md) antes de fazer
+replay.

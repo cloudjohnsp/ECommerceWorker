@@ -12,9 +12,12 @@ public sealed class WorkerRabbitMqOptions
     public string ClientProvidedName { get; init; } = "ecommerce-worker";
     public string ExchangeName { get; init; } = "ecommerce.events";
     public string QueueName { get; init; } = "ecommerce.worker.orders";
+    public string RetryExchangeName { get; init; } = "ecommerce.events.retry";
+    public string RetryQueueName { get; init; } = "ecommerce.worker.orders.retry";
     public string DeadLetterExchangeName { get; init; } = "ecommerce.events.dlx";
     public string DeadLetterQueueName { get; init; } = "ecommerce.worker.orders.dead";
     public int DeliveryLimit { get; init; } = 5;
+    public int MaximumRetryAttempts { get; init; } = 3;
     public int RetryDelaySeconds { get; init; } = 15;
     public int ReconnectDelaySeconds { get; init; } = 5;
 }

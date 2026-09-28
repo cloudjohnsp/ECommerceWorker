@@ -14,9 +14,19 @@ public sealed class IntegrationEventProcessor(
         eventType switch
         {
             StockIntegrationEventProcessor.EventType =>
-                stockProcessor.ProcessAsync(messageId, eventType, body, cancellationToken),
+                stockProcessor.ProcessAsync(
+                    messageId,
+                    eventType,
+                    body,
+                    cancellationToken,
+                    correlationId),
             EmailSentIntegrationEventProcessor.EventType =>
-                emailProcessor.ProcessAsync(messageId, eventType, body, cancellationToken),
+                emailProcessor.ProcessAsync(
+                    messageId,
+                    eventType,
+                    body,
+                    cancellationToken,
+                    correlationId),
             _ => orderProcessor.ProcessAsync(
                 messageId,
                 eventType,

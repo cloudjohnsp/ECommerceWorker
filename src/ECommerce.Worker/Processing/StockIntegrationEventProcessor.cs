@@ -26,7 +26,8 @@ public sealed class StockIntegrationEventProcessor(WorkerDbContext dbContext)
         Guid messageId,
         string eventType,
         ReadOnlyMemory<byte> body,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? correlationId = null)
     {
         if (messageId == Guid.Empty)
             throw new InvalidIntegrationEventException("Integration event message ID is required.");
@@ -71,6 +72,9 @@ public sealed class StockIntegrationEventProcessor(WorkerDbContext dbContext)
 
             await dbContext.ConsumedIntegrationEvents.AddAsync(
                 new ConsumedIntegrationEvent(messageId, eventType, DateTimeOffset.UtcNow),
+                cancellationToken);
+            await dbContext.AnalyticsEvents.AddAsync(
+                new AnalyticsEvent(messageId, eventType, payload.OccurredAt, correlationId),
                 cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
             if (transaction is not null)

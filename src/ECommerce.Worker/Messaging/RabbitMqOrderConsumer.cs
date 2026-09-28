@@ -44,7 +44,12 @@ public sealed class RabbitMqOrderConsumer(
     private async Task ConsumeUntilDisconnectedAsync(CancellationToken stoppingToken)
     {
         await using var connection = await connectionFactory.CreateConnectionAsync(stoppingToken);
-        await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
+        var channelOptions = new CreateChannelOptions(
+            publisherConfirmationsEnabled: true,
+            publisherConfirmationTrackingEnabled: true);
+        await using var channel = await connection.CreateChannelAsync(
+            channelOptions,
+            stoppingToken);
         await DeclareTopologyAsync(channel, stoppingToken);
         await channel.BasicQosAsync(0, 1, false, stoppingToken);
 
@@ -140,7 +145,11 @@ public sealed class RabbitMqOrderConsumer(
                 exception,
                 "Rejecting invalid integration event {MessageId}.",
                 delivery.BasicProperties.MessageId);
-            await channel.BasicRejectAsync(delivery.DeliveryTag, requeue: false, stoppingToken);
+            await DeadLetterOrRequeueAsync(
+                channel,
+                delivery,
+                IntegrationEventFailureReasons.InvalidEvent,
+                stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -153,12 +162,115 @@ public sealed class RabbitMqOrderConsumer(
             WorkerTelemetry.FailedEvents.Add(
                 1,
                 new KeyValuePair<string, object?>("failure.kind", "transient"));
-            logger.LogWarning(
+            var retryCount = IntegrationEventDeliveryPolicy.GetRetryCount(
+                delivery.BasicProperties.Headers);
+            if (IntegrationEventDeliveryPolicy.DecideTransientFailure(
+                    retryCount,
+                    _options.MaximumRetryAttempts) == IntegrationEventFailureAction.Retry)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Integration event {MessageId} failed; scheduling retry {RetryAttempt}/{MaximumRetryAttempts}.",
+                    delivery.BasicProperties.MessageId,
+                    retryCount + 1,
+                    _options.MaximumRetryAttempts);
+                await RetryOrRequeueAsync(channel, delivery, retryCount + 1, stoppingToken);
+            }
+            else
+            {
+                logger.LogError(
+                    exception,
+                    "Integration event {MessageId} exhausted {MaximumRetryAttempts} retries and will be dead-lettered.",
+                    delivery.BasicProperties.MessageId,
+                    _options.MaximumRetryAttempts);
+                await DeadLetterOrRequeueAsync(
+                    channel,
+                    delivery,
+                    IntegrationEventFailureReasons.RetryExhausted,
+                    stoppingToken);
+            }
+        }
+    }
+
+    private async Task RetryOrRequeueAsync(
+        IChannel channel,
+        BasicDeliverEventArgs delivery,
+        int retryCount,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var properties = IntegrationEventDeliveryPolicy.CreateRetryProperties(
+                delivery.BasicProperties,
+                retryCount);
+            await channel.BasicPublishAsync(
+                _options.RetryExchangeName,
+                delivery.RoutingKey,
+                mandatory: true,
+                properties,
+                delivery.Body,
+                cancellationToken);
+            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
+            WorkerTelemetry.RetriedEvents.Add(
+                1,
+                new KeyValuePair<string, object?>("messaging.event.type", delivery.BasicProperties.Type),
+                new KeyValuePair<string, object?>("retry.attempt", retryCount));
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogError(
                 exception,
-                "Integration event {MessageId} failed and will be retried.",
+                "Could not schedule retry for integration event {MessageId}; requeueing the original delivery.",
                 delivery.BasicProperties.MessageId);
-            await Task.Delay(TimeSpan.FromSeconds(_options.RetryDelaySeconds), stoppingToken);
-            await channel.BasicNackAsync(delivery.DeliveryTag, multiple: false, requeue: true, stoppingToken);
+            await channel.BasicNackAsync(
+                delivery.DeliveryTag,
+                multiple: false,
+                requeue: true,
+                cancellationToken);
+        }
+    }
+
+    private async Task DeadLetterOrRequeueAsync(
+        IChannel channel,
+        BasicDeliverEventArgs delivery,
+        string failureReason,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var retryCount = IntegrationEventDeliveryPolicy.GetRetryCount(
+                delivery.BasicProperties.Headers);
+            var properties = IntegrationEventDeliveryPolicy.CreateDeadLetterProperties(
+                delivery.BasicProperties,
+                retryCount,
+                failureReason,
+                delivery.Exchange,
+                delivery.RoutingKey,
+                DateTimeOffset.UtcNow);
+            await channel.BasicPublishAsync(
+                _options.DeadLetterExchangeName,
+                delivery.RoutingKey,
+                mandatory: true,
+                properties,
+                delivery.Body,
+                cancellationToken);
+            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
+            WorkerTelemetry.DeadLetteredEvents.Add(
+                1,
+                new KeyValuePair<string, object?>("messaging.event.type", delivery.BasicProperties.Type),
+                new KeyValuePair<string, object?>("failure.reason", failureReason));
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogError(
+                exception,
+                "Could not dead-letter integration event {MessageId}; requeueing the original delivery.",
+                delivery.BasicProperties.MessageId);
+            await channel.BasicNackAsync(
+                delivery.DeliveryTag,
+                multiple: false,
+                requeue: true,
+                cancellationToken);
         }
     }
 
@@ -265,6 +377,12 @@ public sealed class RabbitMqOrderConsumer(
             durable: true,
             autoDelete: false,
             cancellationToken: cancellationToken);
+        await channel.ExchangeDeclareAsync(
+            _options.RetryExchangeName,
+            ExchangeType.Topic,
+            durable: true,
+            autoDelete: false,
+            cancellationToken: cancellationToken);
 
         var deadQueueArguments = new Dictionary<string, object?>
         {
@@ -280,6 +398,25 @@ public sealed class RabbitMqOrderConsumer(
         await channel.QueueBindAsync(
             _options.DeadLetterQueueName,
             _options.DeadLetterExchangeName,
+            "#",
+            cancellationToken: cancellationToken);
+
+        var retryQueueArguments = new Dictionary<string, object?>
+        {
+            ["x-queue-type"] = "quorum",
+            ["x-message-ttl"] = checked(_options.RetryDelaySeconds * 1000),
+            ["x-dead-letter-exchange"] = _options.ExchangeName
+        };
+        await channel.QueueDeclareAsync(
+            _options.RetryQueueName,
+            durable: true,
+            exclusive: false,
+            autoDelete: false,
+            arguments: retryQueueArguments,
+            cancellationToken: cancellationToken);
+        await channel.QueueBindAsync(
+            _options.RetryQueueName,
+            _options.RetryExchangeName,
             "#",
             cancellationToken: cancellationToken);
 

@@ -95,6 +95,9 @@ public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
             await dbContext.ConsumedIntegrationEvents.AddAsync(
                 new ConsumedIntegrationEvent(messageId, eventType, DateTimeOffset.UtcNow),
                 cancellationToken);
+            await dbContext.AnalyticsEvents.AddAsync(
+                new AnalyticsEvent(messageId, eventType, payload.OccurredAt, correlationId),
+                cancellationToken);
 
             await dbContext.SaveChangesAsync(cancellationToken);
             if (transaction is not null)
