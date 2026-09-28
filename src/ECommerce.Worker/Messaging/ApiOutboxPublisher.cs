@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using ECommerce.Worker.Contracts;
+using ECommerce.Worker.Observability;
 using ECommerce.Worker.Options;
 using ECommerce.Worker.Persistence;
 using ECommerce.Worker.Persistence.Entities;
@@ -20,6 +22,22 @@ public sealed class ApiOutboxPublisher(
         var messages = await ClaimBatchAsync(cancellationToken);
         foreach (var message in messages)
         {
+            using var activity = WorkerTelemetry.ActivitySource.StartActivity(
+                "api-outbox.publish",
+                ActivityKind.Producer);
+            activity?.SetTag("messaging.message.id", message.Id);
+            activity?.SetTag("ecommerce.outbox_message.id", message.Id);
+            activity?.SetTag("correlation.id", message.CorrelationId);
+            using var logScope = logger.BeginScope(new Dictionary<string, object>
+            {
+                ["CorrelationId"] = message.CorrelationId,
+                ["MessageId"] = message.Id,
+                ["OutboxMessageId"] = message.Id
+            });
+            var startedAt = Stopwatch.GetTimestamp();
+            WorkerTelemetry.MessageAge.Record(
+                Math.Max(0, (DateTimeOffset.UtcNow - message.CreatedAt).TotalSeconds),
+                new KeyValuePair<string, object?>("queue", "api_outbox"));
             var lockId = message.LockId!.Value;
             try
             {
@@ -41,12 +59,22 @@ public sealed class ApiOutboxPublisher(
             }
             catch (Exception exception)
             {
-                await MarkFailedAsync(message, lockId, exception.Message, cancellationToken);
+                await MarkFailedAsync(
+                    message,
+                    lockId,
+                    $"publication_failed:{exception.GetType().Name}",
+                    cancellationToken);
                 logger.LogWarning(
-                    exception,
-                    "API outbox message {MessageId} publication failed on attempt {Attempt}.",
+                    "API outbox message {MessageId} publication failed on attempt {Attempt} ({FailureType}).",
                     message.Id,
-                    message.Attempts);
+                    message.Attempts,
+                    exception.GetType().Name);
+            }
+            finally
+            {
+                WorkerTelemetry.OperationDuration.Record(
+                    Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+                    new KeyValuePair<string, object?>("operation", "api_outbox.publish"));
             }
         }
 
@@ -57,6 +85,8 @@ public sealed class ApiOutboxPublisher(
     {
         var now = DateTimeOffset.UtcNow;
         var lockId = Guid.NewGuid();
+        WorkerTelemetry.SetApiOutboxBacklog(
+            await PendingQuery(now).LongCountAsync(cancellationToken));
         if (!dbContext.Database.IsRelational())
         {
             var inMemoryMessages = await PendingQuery(now)

@@ -12,4 +12,5 @@ public sealed class WorkerEmailOptions
     public string Password { get; init; } = string.Empty;
     public string FromAddress { get; init; } = "no-reply@ecommerce.local";
     public string FromName { get; init; } = "ECommerce";
+    public int TimeoutSeconds { get; init; } = 15;
 }

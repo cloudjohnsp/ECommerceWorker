@@ -23,6 +23,7 @@ public sealed class SmtpOrderEmailSender(IOptions<WorkerEmailOptions> options) :
         message.Body = new TextPart("plain") { Text = body };
 
         using var client = new SmtpClient();
+        client.Timeout = checked(_options.TimeoutSeconds * 1000);
         await client.ConnectAsync(
             _options.Host,
             _options.Port,

@@ -5,6 +5,7 @@ using ECommerce.Worker.Observability;
 using ECommerce.Worker.Options;
 using ECommerce.Worker.Persistence;
 using ECommerce.Worker.Processing;
+using ECommerce.Worker.Resilience;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -27,9 +28,16 @@ var connectionString = builder.Configuration.GetConnectionString("WorkerDatabase
 if (string.IsNullOrWhiteSpace(connectionString))
     throw new InvalidOperationException("ConnectionStrings:WorkerDatabase is required.");
 
-builder.Services.AddDbContext<WorkerDbContext>(options =>
+var runtimeOptions = builder.Configuration
+    .GetSection(WorkerRuntimeOptions.SectionName)
+    .Get<WorkerRuntimeOptions>() ?? new WorkerRuntimeOptions();
+builder.Services.AddDbContextPool<WorkerDbContext>(options =>
     options.UseNpgsql(connectionString, npgsql =>
-        npgsql.MigrationsHistoryTable("__EFMigrationsHistory", WorkerDbContext.SchemaName)));
+    {
+        npgsql.MigrationsHistoryTable("__EFMigrationsHistory", WorkerDbContext.SchemaName);
+        npgsql.CommandTimeout(Math.Clamp(runtimeOptions.DatabaseCommandTimeoutSeconds, 1, 300));
+    }), Math.Clamp(runtimeOptions.DatabasePoolSize, 1, 256));
+builder.Services.AddSingleton<WorkerOperationDrain>();
 builder.Services.AddScoped<OrderIntegrationEventProcessor>();
 builder.Services.AddScoped<StockIntegrationEventProcessor>();
 builder.Services.AddScoped<EmailSentIntegrationEventProcessor>();
@@ -50,31 +58,40 @@ builder.Services.AddOptions<WorkerRabbitMqOptions>()
     .Validate(options => !string.IsNullOrWhiteSpace(options.RetryQueueName), "RabbitMq:RetryQueueName is required.")
     .Validate(options => !string.IsNullOrWhiteSpace(options.DeadLetterExchangeName), "RabbitMq:DeadLetterExchangeName is required.")
     .Validate(options => !string.IsNullOrWhiteSpace(options.DeadLetterQueueName), "RabbitMq:DeadLetterQueueName is required.")
-    .Validate(options => options.DeliveryLimit > 0, "RabbitMq:DeliveryLimit must be positive.")
-    .Validate(options => options.MaximumRetryAttempts > 0, "RabbitMq:MaximumRetryAttempts must be positive.")
-    .Validate(options => options.RetryDelaySeconds > 0, "RabbitMq:RetryDelaySeconds must be positive.")
-    .Validate(options => options.ReconnectDelaySeconds > 0, "RabbitMq:ReconnectDelaySeconds must be positive.")
+    .Validate(options => options.DeliveryLimit is >= 1 and <= 100, "RabbitMq:DeliveryLimit must be between 1 and 100.")
+    .Validate(options => options.MaximumRetryAttempts is >= 1 and <= 20, "RabbitMq:MaximumRetryAttempts must be between 1 and 20.")
+    .Validate(options => options.RetryDelaySeconds is >= 1 and <= 3600, "RabbitMq:RetryDelaySeconds must be between 1 and 3600.")
+    .Validate(options => options.ReconnectDelaySeconds is >= 1 and <= 300, "RabbitMq:ReconnectDelaySeconds must be between 1 and 300.")
+    .ValidateOnStart();
+builder.Services.AddOptions<WorkerRuntimeOptions>()
+    .Bind(builder.Configuration.GetSection(WorkerRuntimeOptions.SectionName))
+    .Validate(options => options.ShutdownDrainSeconds is >= 1 and <= 300, "WorkerRuntime:ShutdownDrainSeconds must be between 1 and 300.")
+    .Validate(options => options.ConsumerConcurrency is >= 1 and <= 32, "WorkerRuntime:ConsumerConcurrency must be between 1 and 32.")
+    .Validate(options => options.DatabasePoolSize is >= 1 and <= 256, "WorkerRuntime:DatabasePoolSize must be between 1 and 256.")
+    .Validate(options => options.DatabaseCommandTimeoutSeconds is >= 1 and <= 300, "WorkerRuntime:DatabaseCommandTimeoutSeconds must be between 1 and 300.")
+    .Validate(options => options.RabbitMqConnectionTimeoutSeconds is >= 1 and <= 60, "WorkerRuntime:RabbitMqConnectionTimeoutSeconds must be between 1 and 60.")
     .ValidateOnStart();
 builder.Services.AddOptions<WorkerEmailOptions>()
     .Bind(builder.Configuration.GetSection(WorkerEmailOptions.SectionName))
     .Validate(options => !options.Enabled || !string.IsNullOrWhiteSpace(options.Host), "Email:Host is required.")
     .Validate(options => !options.Enabled || options.Port > 0, "Email:Port must be positive.")
     .Validate(options => !options.Enabled || !string.IsNullOrWhiteSpace(options.FromAddress), "Email:FromAddress is required.")
+    .Validate(options => options.TimeoutSeconds is >= 1 and <= 300, "Email:TimeoutSeconds must be between 1 and 300.")
     .ValidateOnStart();
 builder.Services.AddOptions<NotificationProcessorOptions>()
     .Bind(builder.Configuration.GetSection(NotificationProcessorOptions.SectionName))
-    .Validate(options => options.BatchSize > 0, "NotificationProcessor:BatchSize must be positive.")
-    .Validate(options => options.PollIntervalSeconds > 0, "NotificationProcessor:PollIntervalSeconds must be positive.")
-    .Validate(options => options.LockSeconds > 0, "NotificationProcessor:LockSeconds must be positive.")
-    .Validate(options => options.MaximumAttempts > 0, "NotificationProcessor:MaximumAttempts must be positive.")
+    .Validate(options => options.BatchSize is >= 1 and <= 500, "NotificationProcessor:BatchSize must be between 1 and 500.")
+    .Validate(options => options.PollIntervalSeconds is >= 1 and <= 300, "NotificationProcessor:PollIntervalSeconds must be between 1 and 300.")
+    .Validate(options => options.LockSeconds is >= 5 and <= 3600, "NotificationProcessor:LockSeconds must be between 5 and 3600.")
+    .Validate(options => options.MaximumAttempts is >= 1 and <= 100, "NotificationProcessor:MaximumAttempts must be between 1 and 100.")
     .ValidateOnStart();
 builder.Services.AddOptions<ApiOutboxPublisherOptions>()
     .Bind(builder.Configuration.GetSection(ApiOutboxPublisherOptions.SectionName))
-    .Validate(options => options.BatchSize > 0, "ApiOutboxPublisher:BatchSize must be positive.")
-    .Validate(options => options.PollIntervalSeconds > 0, "ApiOutboxPublisher:PollIntervalSeconds must be positive.")
-    .Validate(options => options.LockSeconds > 0, "ApiOutboxPublisher:LockSeconds must be positive.")
-    .Validate(options => options.MaximumAttempts > 0, "ApiOutboxPublisher:MaximumAttempts must be positive.")
-    .Validate(options => options.BaseRetryDelaySeconds > 0, "ApiOutboxPublisher:BaseRetryDelaySeconds must be positive.")
+    .Validate(options => options.BatchSize is >= 1 and <= 500, "ApiOutboxPublisher:BatchSize must be between 1 and 500.")
+    .Validate(options => options.PollIntervalSeconds is >= 1 and <= 300, "ApiOutboxPublisher:PollIntervalSeconds must be between 1 and 300.")
+    .Validate(options => options.LockSeconds is >= 5 and <= 3600, "ApiOutboxPublisher:LockSeconds must be between 5 and 3600.")
+    .Validate(options => options.MaximumAttempts is >= 1 and <= 100, "ApiOutboxPublisher:MaximumAttempts must be between 1 and 100.")
+    .Validate(options => options.BaseRetryDelaySeconds is >= 1 and <= 3600, "ApiOutboxPublisher:BaseRetryDelaySeconds must be between 1 and 3600.")
     .ValidateOnStart();
 builder.Services.AddOptions<WorkerObservabilityOptions>()
     .Bind(builder.Configuration.GetSection(WorkerObservabilityOptions.SectionName))
@@ -96,11 +113,16 @@ builder.Services.AddSingleton(_ => new ConnectionFactory
     Password = rabbitMqOptions.Password,
     VirtualHost = rabbitMqOptions.VirtualHost,
     ClientProvidedName = rabbitMqOptions.ClientProvidedName,
+    RequestedConnectionTimeout = TimeSpan.FromSeconds(
+        Math.Clamp(runtimeOptions.RabbitMqConnectionTimeoutSeconds, 1, 60)),
     AutomaticRecoveryEnabled = false,
-    ConsumerDispatchConcurrency = 1
+    ConsumerDispatchConcurrency = (ushort)Math.Clamp(runtimeOptions.ConsumerConcurrency, 1, 32)
 });
+builder.Services.Configure<HostOptions>(options =>
+    options.ShutdownTimeout = TimeSpan.FromSeconds(
+        Math.Clamp(runtimeOptions.ShutdownDrainSeconds, 1, 300) + 5));
 builder.Services.AddSingleton<IWorkerIntegrationEventPublisher, RabbitMqWorkerIntegrationEventPublisher>();
-builder.Services.AddHealthChecks()
+var healthChecks = builder.Services.AddHealthChecks()
     .AddCheck<WorkerPostgresHealthCheck>(
         "postgres",
         tags: ["ready"],
@@ -144,7 +166,13 @@ var emailOptions = builder.Configuration
     .GetSection(WorkerEmailOptions.SectionName)
     .Get<WorkerEmailOptions>() ?? new WorkerEmailOptions();
 if (emailOptions.Enabled)
+{
     builder.Services.AddSingleton<IOrderEmailSender, SmtpOrderEmailSender>();
+    healthChecks.AddCheck<WorkerSmtpHealthCheck>(
+        "smtp",
+        tags: ["ready"],
+        timeout: TimeSpan.FromSeconds(emailOptions.TimeoutSeconds));
+}
 else
     builder.Services.AddSingleton<IOrderEmailSender, DisabledOrderEmailSender>();
 
@@ -157,6 +185,12 @@ if (apiOutboxOptions.Enabled)
     builder.Services.AddHostedService<ApiOutboxDispatcher>();
 
 var app = builder.Build();
+_ = app.Services.GetRequiredService<IOptions<WorkerRuntimeOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<WorkerRabbitMqOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<WorkerEmailOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<NotificationProcessorOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<ApiOutboxPublisherOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<WorkerObservabilityOptions>>().Value;
 await app.Services.InitializeWorkerDatabaseAsync();
 
 app.MapHealthChecks("/health");

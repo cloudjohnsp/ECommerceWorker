@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using ECommerce.Worker.Contracts;
 using ECommerce.Worker.Persistence;
@@ -7,7 +8,9 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ECommerce.Worker.Processing;
 
-public sealed class StockIntegrationEventProcessor(WorkerDbContext dbContext)
+public sealed class StockIntegrationEventProcessor(
+    WorkerDbContext dbContext,
+    ILogger<StockIntegrationEventProcessor>? logger = null)
 {
     public const string EventType = IntegrationEventTypes.StockUpdated;
 
@@ -40,6 +43,15 @@ public sealed class StockIntegrationEventProcessor(WorkerDbContext dbContext)
 
         var payload = Deserialize(body);
         Validate(payload);
+        Activity.Current?.SetTag("ecommerce.order.id", payload.OrderId);
+        var logValues = new Dictionary<string, object>
+        {
+            ["CorrelationId"] = correlationId ?? messageId.ToString("N"),
+            ["MessageId"] = messageId
+        };
+        if (payload.OrderId.HasValue)
+            logValues["OrderId"] = payload.OrderId.Value;
+        using var logScope = logger?.BeginScope(logValues);
 
         await using var transaction = await BeginTransactionIfSupportedAsync(cancellationToken);
         try

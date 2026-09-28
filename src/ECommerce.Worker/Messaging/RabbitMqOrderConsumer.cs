@@ -5,6 +5,7 @@ using ECommerce.Worker.Contracts;
 using ECommerce.Worker.Observability;
 using ECommerce.Worker.Options;
 using ECommerce.Worker.Processing;
+using ECommerce.Worker.Resilience;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
@@ -15,9 +16,12 @@ public sealed class RabbitMqOrderConsumer(
     ConnectionFactory connectionFactory,
     IServiceScopeFactory scopeFactory,
     IOptions<WorkerRabbitMqOptions> options,
+    IOptions<WorkerRuntimeOptions> runtimeOptions,
+    WorkerOperationDrain drain,
     ILogger<RabbitMqOrderConsumer> logger) : BackgroundService
 {
     private readonly WorkerRabbitMqOptions _options = options.Value;
+    private readonly WorkerRuntimeOptions _runtimeOptions = runtimeOptions.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -51,7 +55,11 @@ public sealed class RabbitMqOrderConsumer(
             channelOptions,
             stoppingToken);
         await DeclareTopologyAsync(channel, stoppingToken);
-        await channel.BasicQosAsync(0, 1, false, stoppingToken);
+        await channel.BasicQosAsync(
+            0,
+            (ushort)_runtimeOptions.ConsumerConcurrency,
+            false,
+            stoppingToken);
 
         var disconnected = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -64,7 +72,7 @@ public sealed class RabbitMqOrderConsumer(
         var consumer = new AsyncEventingBasicConsumer(channel);
         consumer.ReceivedAsync += async (_, delivery) =>
             await HandleDeliveryAsync(channel, delivery, stoppingToken);
-        await channel.BasicConsumeAsync(
+        var consumerTag = await channel.BasicConsumeAsync(
             _options.QueueName,
             autoAck: false,
             consumer,
@@ -73,7 +81,15 @@ public sealed class RabbitMqOrderConsumer(
         logger.LogInformation("Consuming RabbitMQ queue {QueueName}.", _options.QueueName);
         var cancelled = Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
         await Task.WhenAny(disconnected.Task, cancelled);
-        stoppingToken.ThrowIfCancellationRequested();
+        if (stoppingToken.IsCancellationRequested)
+        {
+            drain.StopAccepting();
+            if (channel.IsOpen)
+                await channel.BasicCancelAsync(consumerTag, false, CancellationToken.None);
+            if (!await drain.WaitForDrainAsync(CancellationToken.None))
+                logger.LogWarning("Worker drain deadline elapsed with operations still in progress.");
+            return;
+        }
         throw new InvalidOperationException("RabbitMQ connection was closed.");
     }
 
@@ -82,6 +98,27 @@ public sealed class RabbitMqOrderConsumer(
         BasicDeliverEventArgs delivery,
         CancellationToken stoppingToken)
     {
+        if (!drain.TryBegin(out var lease))
+        {
+            await channel.BasicNackAsync(
+                delivery.DeliveryTag,
+                multiple: false,
+                requeue: true,
+                CancellationToken.None);
+            return;
+        }
+        using (lease)
+        {
+            await HandleDeliveryCoreAsync(channel, delivery, lease.CancellationToken);
+        }
+    }
+
+    private async Task HandleDeliveryCoreAsync(
+        IChannel channel,
+        BasicDeliverEventArgs delivery,
+        CancellationToken operationToken)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
         using var activity = WorkerTelemetry.ActivitySource.StartActivity(
             "rabbitmq.consume",
             ActivityKind.Consumer);
@@ -89,6 +126,16 @@ public sealed class RabbitMqOrderConsumer(
         activity?.SetTag("messaging.destination.name", _options.QueueName);
         activity?.SetTag("messaging.message.id", delivery.BasicProperties.MessageId);
         activity?.SetTag("messaging.event.type", delivery.BasicProperties.Type);
+        var diagnosticCorrelationId = NormalizeCorrelationIdForDiagnostics(
+            GetHeader(delivery.BasicProperties.Headers, IntegrationEventContract.CorrelationHeaderName),
+            delivery.BasicProperties.MessageId);
+        activity?.SetTag("correlation.id", diagnosticCorrelationId);
+        using var transportLogScope = logger.BeginScope(new Dictionary<string, object>
+        {
+            ["CorrelationId"] = diagnosticCorrelationId,
+            ["MessageId"] = delivery.BasicProperties.MessageId ?? string.Empty,
+            ["EventType"] = delivery.BasicProperties.Type ?? string.Empty
+        });
 
         try
         {
@@ -109,14 +156,17 @@ public sealed class RabbitMqOrderConsumer(
                 contractVersion,
                 delivery.BasicProperties.Headers,
                 delivery.Body);
-            activity?.SetTag("correlation.id", parsed.CorrelationId);
+            var parsedCorrelationId = NormalizeCorrelationIdForDiagnostics(
+                parsed.CorrelationId,
+                parsed.MessageId.ToString("N"));
+            activity?.SetTag("correlation.id", parsedCorrelationId);
             activity?.SetTag("messaging.contract.version", parsed.Version);
 
             using var scope = scopeFactory.CreateScope();
             var processor = scope.ServiceProvider.GetRequiredService<IntegrationEventProcessor>();
             using var logScope = logger.BeginScope(new Dictionary<string, object>
             {
-                ["CorrelationId"] = parsed.CorrelationId,
+                ["CorrelationId"] = parsedCorrelationId,
                 ["MessageId"] = parsed.MessageId,
                 ["EventType"] = parsed.EventType
             });
@@ -124,7 +174,7 @@ public sealed class RabbitMqOrderConsumer(
                 parsed.MessageId,
                 parsed.EventType,
                 parsed.Payload,
-                stoppingToken,
+                operationToken,
                 parsed.CorrelationId);
             var eventTypeTag = new KeyValuePair<string, object?>(
                 "messaging.event.type",
@@ -133,7 +183,7 @@ public sealed class RabbitMqOrderConsumer(
                 WorkerTelemetry.DuplicateEvents.Add(1, eventTypeTag);
             else
                 WorkerTelemetry.ConsumedEvents.Add(1, eventTypeTag);
-            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, stoppingToken);
+            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, operationToken);
         }
         catch (InvalidIntegrationEventException exception)
         {
@@ -142,16 +192,15 @@ public sealed class RabbitMqOrderConsumer(
                 1,
                 new KeyValuePair<string, object?>("failure.kind", "invalid"));
             logger.LogWarning(
-                exception,
                 "Rejecting invalid integration event {MessageId}.",
                 delivery.BasicProperties.MessageId);
             await DeadLetterOrRequeueAsync(
                 channel,
                 delivery,
                 IntegrationEventFailureReasons.InvalidEvent,
-                stoppingToken);
+                operationToken);
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (operationToken.IsCancellationRequested)
         {
             if (channel.IsOpen)
                 await channel.BasicNackAsync(delivery.DeliveryTag, false, true, CancellationToken.None);
@@ -174,7 +223,7 @@ public sealed class RabbitMqOrderConsumer(
                     delivery.BasicProperties.MessageId,
                     retryCount + 1,
                     _options.MaximumRetryAttempts);
-                await RetryOrRequeueAsync(channel, delivery, retryCount + 1, stoppingToken);
+                await RetryOrRequeueAsync(channel, delivery, retryCount + 1, operationToken);
             }
             else
             {
@@ -187,9 +236,13 @@ public sealed class RabbitMqOrderConsumer(
                     channel,
                     delivery,
                     IntegrationEventFailureReasons.RetryExhausted,
-                    stoppingToken);
+                    operationToken);
             }
         }
+        WorkerTelemetry.OperationDuration.Record(
+            Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+            new KeyValuePair<string, object?>("operation", "rabbitmq.consume"),
+            new KeyValuePair<string, object?>("messaging.event.type", delivery.BasicProperties.Type));
     }
 
     private async Task RetryOrRequeueAsync(
@@ -353,6 +406,19 @@ public sealed class RabbitMqOrderConsumer(
             string text => text,
             _ => value.ToString()
         };
+    }
+
+    private static string NormalizeCorrelationIdForDiagnostics(
+        string? correlationId,
+        string? fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(correlationId) &&
+            correlationId.Length <= 128 &&
+            correlationId.All(character =>
+                char.IsLetterOrDigit(character) || character is '-' or '_' or '.'))
+            return correlationId;
+
+        return string.IsNullOrWhiteSpace(fallback) ? "unknown" : fallback;
     }
 
     internal sealed record ParsedIntegrationEvent(

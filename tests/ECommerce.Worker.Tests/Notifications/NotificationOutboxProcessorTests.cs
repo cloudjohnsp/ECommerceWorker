@@ -56,7 +56,7 @@ public sealed class NotificationOutboxProcessorTests
         processed.Should().Be(1);
         message.SentAt.Should().BeNull();
         message.Attempts.Should().Be(1);
-        message.LastError.Should().Be("SMTP unavailable");
+        message.LastError.Should().Be("notification_failed:InvalidOperationException");
         message.NextAttemptAt.Should().BeAfter(before.AddSeconds(9));
         message.LockedUntil.Should().BeNull();
         (await context.IntegrationOutboxMessages.CountAsync()).Should().Be(0);

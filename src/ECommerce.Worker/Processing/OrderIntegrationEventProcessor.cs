@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Mail;
 using System.Text.Json;
 using ECommerce.Worker.Contracts;
@@ -8,7 +9,9 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ECommerce.Worker.Processing;
 
-public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
+public sealed class OrderIntegrationEventProcessor(
+    WorkerDbContext dbContext,
+    ILogger<OrderIntegrationEventProcessor>? logger = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SupportedEventTypes =
@@ -41,6 +44,13 @@ public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
 
         var payload = Deserialize(body);
         Validate(payload, eventType);
+        Activity.Current?.SetTag("ecommerce.order.id", payload.OrderId);
+        using var logScope = logger?.BeginScope(new Dictionary<string, object>
+        {
+            ["CorrelationId"] = correlationId ?? messageId.ToString("N"),
+            ["MessageId"] = messageId,
+            ["OrderId"] = payload.OrderId
+        });
 
         await using var transaction = await BeginTransactionIfSupportedAsync(cancellationToken);
         try

@@ -46,7 +46,7 @@ public sealed class ApiOutboxPublisherTests
         processed.Should().Be(1);
         message.Status.Should().Be(ApiOutboxMessage.PendingStatus);
         message.Attempts.Should().Be(1);
-        message.LastError.Should().Contain("unavailable");
+        message.LastError.Should().Be("publication_failed:InvalidOperationException");
         message.NextAttemptAt.Should().BeAfter(DateTimeOffset.UtcNow);
         message.LockId.Should().BeNull();
         message.LockedUntil.Should().BeNull();

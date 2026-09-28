@@ -43,7 +43,7 @@ public sealed class WorkerIntegrationEventOutboxProcessorTests
         processed.Should().Be(1);
         message.ProcessedAt.Should().BeNull();
         message.Attempts.Should().Be(1);
-        message.LastError.Should().Be("RabbitMQ unavailable");
+        message.LastError.Should().Be("publication_failed:InvalidOperationException");
         message.NextAttemptAt.Should().BeAfter(before.AddSeconds(9));
         message.LockedUntil.Should().BeNull();
     }

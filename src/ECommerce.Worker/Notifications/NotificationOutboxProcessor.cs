@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using ECommerce.Worker.Contracts;
 using ECommerce.Worker.Options;
@@ -23,6 +24,22 @@ public sealed class NotificationOutboxProcessor(
         var messages = await ClaimBatchAsync(cancellationToken);
         foreach (var message in messages)
         {
+            using var activity = WorkerTelemetry.ActivitySource.StartActivity(
+                "notification.send",
+                ActivityKind.Producer);
+            activity?.SetTag("messaging.message.id", message.SourceMessageId);
+            activity?.SetTag("ecommerce.outbox_message.id", message.Id);
+            activity?.SetTag("correlation.id", message.CorrelationId);
+            using var logScope = logger.BeginScope(new Dictionary<string, object>
+            {
+                ["CorrelationId"] = message.CorrelationId,
+                ["MessageId"] = message.SourceMessageId,
+                ["OutboxMessageId"] = message.Id
+            });
+            var startedAt = Stopwatch.GetTimestamp();
+            WorkerTelemetry.MessageAge.Record(
+                Math.Max(0, (DateTimeOffset.UtcNow - message.CreatedAt).TotalSeconds),
+                new KeyValuePair<string, object?>("queue", "notification_outbox"));
             try
             {
                 await emailSender.SendAsync(
@@ -39,14 +56,19 @@ public sealed class NotificationOutboxProcessor(
             {
                 var retryDelay = TimeSpan.FromSeconds(
                     Math.Min(Math.Pow(2, message.Attempts + 1) * 5, 3600));
-                message.MarkFailed(exception.Message, DateTimeOffset.UtcNow.Add(retryDelay));
+                message.MarkFailed(
+                    $"notification_failed:{exception.GetType().Name}",
+                    DateTimeOffset.UtcNow.Add(retryDelay));
                 WorkerTelemetry.FailedNotifications.Add(1);
                 logger.LogWarning(
-                    exception,
-                    "Notification {NotificationId} delivery failed on attempt {Attempt}.",
+                    "Notification {NotificationId} delivery failed on attempt {Attempt} ({FailureType}).",
                     message.Id,
-                    message.Attempts);
+                    message.Attempts,
+                    exception.GetType().Name);
                 await dbContext.SaveChangesAsync(cancellationToken);
+                WorkerTelemetry.OperationDuration.Record(
+                    Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+                    new KeyValuePair<string, object?>("operation", "notification.send"));
                 continue;
             }
 
@@ -66,6 +88,9 @@ public sealed class NotificationOutboxProcessor(
                 cancellationToken);
             WorkerTelemetry.SentNotifications.Add(1);
             await dbContext.SaveChangesAsync(cancellationToken);
+            WorkerTelemetry.OperationDuration.Record(
+                Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+                new KeyValuePair<string, object?>("operation", "notification.send"));
         }
 
         return messages.Count;
@@ -75,6 +100,8 @@ public sealed class NotificationOutboxProcessor(
         CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
+        WorkerTelemetry.SetNotificationBacklog(
+            await PendingQuery(now).LongCountAsync(cancellationToken));
         if (!dbContext.Database.IsRelational())
         {
             var inMemoryMessages = await PendingQuery(now)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ECommerce.Worker.Observability;
 using ECommerce.Worker.Options;
 using ECommerce.Worker.Persistence;
@@ -20,6 +21,22 @@ public sealed class WorkerIntegrationEventOutboxProcessor(
         var messages = await ClaimBatchAsync(cancellationToken);
         foreach (var message in messages)
         {
+            using var activity = WorkerTelemetry.ActivitySource.StartActivity(
+                "worker-outbox.publish",
+                ActivityKind.Producer);
+            activity?.SetTag("messaging.message.id", message.Id);
+            activity?.SetTag("ecommerce.outbox_message.id", message.Id);
+            activity?.SetTag("correlation.id", message.CorrelationId);
+            using var logScope = logger.BeginScope(new Dictionary<string, object>
+            {
+                ["CorrelationId"] = message.CorrelationId,
+                ["MessageId"] = message.Id,
+                ["OutboxMessageId"] = message.Id
+            });
+            var startedAt = Stopwatch.GetTimestamp();
+            WorkerTelemetry.MessageAge.Record(
+                Math.Max(0, (DateTimeOffset.UtcNow - message.CreatedAt).TotalSeconds),
+                new KeyValuePair<string, object?>("queue", "integration_outbox"));
             try
             {
                 await publisher.PublishAsync(
@@ -41,16 +58,21 @@ public sealed class WorkerIntegrationEventOutboxProcessor(
             {
                 var retryDelay = TimeSpan.FromSeconds(
                     Math.Min(Math.Pow(2, message.Attempts + 1) * 5, 3600));
-                message.MarkFailed(exception.Message, DateTimeOffset.UtcNow.Add(retryDelay));
+                message.MarkFailed(
+                    $"publication_failed:{exception.GetType().Name}",
+                    DateTimeOffset.UtcNow.Add(retryDelay));
                 WorkerTelemetry.FailedEventPublications.Add(1);
                 logger.LogWarning(
-                    exception,
-                    "Integration event {MessageId} publication failed on attempt {Attempt}.",
+                    "Integration event {MessageId} publication failed on attempt {Attempt} ({FailureType}).",
                     message.Id,
-                    message.Attempts);
+                    message.Attempts,
+                    exception.GetType().Name);
             }
 
             await dbContext.SaveChangesAsync(cancellationToken);
+            WorkerTelemetry.OperationDuration.Record(
+                Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+                new KeyValuePair<string, object?>("operation", "worker_outbox.publish"));
         }
 
         return messages.Count;
@@ -60,6 +82,8 @@ public sealed class WorkerIntegrationEventOutboxProcessor(
         CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
+        WorkerTelemetry.SetIntegrationOutboxBacklog(
+            await PendingQuery(now).LongCountAsync(cancellationToken));
         if (!dbContext.Database.IsRelational())
         {
             var inMemoryMessages = await PendingQuery(now)

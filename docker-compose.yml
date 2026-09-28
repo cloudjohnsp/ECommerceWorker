@@ -35,6 +35,11 @@ services:
       dockerfile: Dockerfile
     environment:
       ConnectionStrings__WorkerDatabase: Host=worker-db;Port=5432;Database=ecommerce_worker;Username=postgres;Password=postgres
+      WorkerRuntime__ShutdownDrainSeconds: 30
+      WorkerRuntime__ConsumerConcurrency: 1
+      WorkerRuntime__DatabasePoolSize: 32
+      WorkerRuntime__DatabaseCommandTimeoutSeconds: 30
+      WorkerRuntime__RabbitMqConnectionTimeoutSeconds: 10
       RabbitMq__HostName: rabbitmq
       RabbitMq__Port: 5672
       RabbitMq__UserName: guest

@@ -101,6 +101,30 @@ Endpoints operacionais:
 - `/health/ready`: PostgreSQL e RabbitMQ disponíveis;
 - `/metrics`: métricas Prometheus, quando habilitadas.
 
+`/health/live` não consulta dependências. `/health/ready` exige PostgreSQL e
+RabbitMQ e, quando `Email:Enabled=true`, também testa a conectividade SMTP. Uma
+falha de readiness não encerra o processo; o consumer mantém seu ciclo de
+reconexão limitado.
+
+## Limites e encerramento
+
+`WorkerRuntime` limita concorrência do consumer (1–32), pool do EF Core (1–256),
+timeout de comando PostgreSQL, timeout de conexão RabbitMQ e prazo de drenagem.
+Batch size, polling, lease, tentativas, SMTP e retries também possuem limites
+validados na inicialização. Valores inválidos impedem o start com o nome da
+opção, sem imprimir connection strings, senhas ou payloads.
+
+No shutdown, o Worker deixa de aceitar novos batches e cancela o consumer. As
+operações já iniciadas recebem até `WorkerRuntime:ShutdownDrainSeconds` para
+terminar. Após o prazo, o token da operação é cancelado; mensagens RabbitMQ não
+confirmadas retornam à fila e claims de Outbox expiram para retomada segura.
+
+Logs e traces usam `CorrelationId`, `MessageId`, `OrderId` e
+`OutboxMessageId` quando disponíveis. `PaymentId` não faz parte dos contratos
+consumidos atualmente. Payloads, destinatários, tokens e segredos não são
+registrados. Além dos contadores de consumo/retry/DLQ, as métricas expõem backlog
+das três outboxes, idade das mensagens e histogramas de latência operacional.
+
 Para operações EF que precisam conectar ao banco, configure
 `ECOMMERCE_WORKER_DESIGN_TIME_CONNECTION_STRING`. A factory não contém senha
 embutida.
