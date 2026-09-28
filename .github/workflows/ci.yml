@@ -43,4 +43,4 @@ jobs:
           RUN_POSTGRES_INTEGRATION_TESTS: true
 
       - name: Build container image
-        run: docker build --tag ecommerce-worker:ci .
+        run: docker build --label "org.opencontainers.image.revision=${GITHUB_SHA}" --tag "ecommerce-worker:sha-${GITHUB_SHA}" .
