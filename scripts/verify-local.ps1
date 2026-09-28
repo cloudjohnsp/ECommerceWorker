@@ -37,9 +37,11 @@ try {
 
     if (-not $SkipImage) {
         $revision = (& git rev-parse HEAD).Trim()
+        $dirty = -not [string]::IsNullOrWhiteSpace((& git status --porcelain) -join "`n")
+        $tag = "ecommerce-worker:sha-$revision" + $(if ($dirty) { "-dirty" } else { "" })
         Invoke-GateStep "Build Worker image" {
             docker build --label "org.opencontainers.image.revision=$revision" `
-                --tag "ecommerce-worker:sha-$revision" .
+                --tag $tag .
         }
     }
 }
