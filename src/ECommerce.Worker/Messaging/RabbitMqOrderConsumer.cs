@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using ECommerce.Worker.Contracts;
 using ECommerce.Worker.Observability;
 using ECommerce.Worker.Options;
@@ -90,18 +91,36 @@ public sealed class RabbitMqOrderConsumer(
                 throw new InvalidIntegrationEventException("RabbitMQ MessageId must be a GUID.");
             if (string.IsNullOrWhiteSpace(delivery.BasicProperties.Type))
                 throw new InvalidIntegrationEventException("RabbitMQ event type is required.");
-            var contractVersion = GetContractVersion(delivery.BasicProperties.Headers);
+            var contractVersion = GetHeader(
+                delivery.BasicProperties.Headers,
+                IntegrationEventContract.VersionHeaderName);
             if (!IntegrationEventContract.IsSupportedVersion(contractVersion))
                 throw new InvalidIntegrationEventException(
                     $"Unsupported integration event contract version '{contractVersion}'.");
 
-            using var scope = scopeFactory.CreateScope();
-            var processor = scope.ServiceProvider.GetRequiredService<IntegrationEventProcessor>();
-            var result = await processor.ProcessAsync(
+            var parsed = ParseDelivery(
                 messageId,
                 delivery.BasicProperties.Type,
-                delivery.Body,
-                stoppingToken);
+                contractVersion,
+                delivery.BasicProperties.Headers,
+                delivery.Body);
+            activity?.SetTag("correlation.id", parsed.CorrelationId);
+            activity?.SetTag("messaging.contract.version", parsed.Version);
+
+            using var scope = scopeFactory.CreateScope();
+            var processor = scope.ServiceProvider.GetRequiredService<IntegrationEventProcessor>();
+            using var logScope = logger.BeginScope(new Dictionary<string, object>
+            {
+                ["CorrelationId"] = parsed.CorrelationId,
+                ["MessageId"] = parsed.MessageId,
+                ["EventType"] = parsed.EventType
+            });
+            var result = await processor.ProcessAsync(
+                parsed.MessageId,
+                parsed.EventType,
+                parsed.Payload,
+                stoppingToken,
+                parsed.CorrelationId);
             var eventTypeTag = new KeyValuePair<string, object?>(
                 "messaging.event.type",
                 delivery.BasicProperties.Type);
@@ -143,10 +162,75 @@ public sealed class RabbitMqOrderConsumer(
         }
     }
 
-    private static string? GetContractVersion(IDictionary<string, object?>? headers)
+    internal static ParsedIntegrationEvent ParseDelivery(
+        Guid transportMessageId,
+        string transportEventType,
+        string? transportVersion,
+        IDictionary<string, object?>? headers,
+        ReadOnlyMemory<byte> body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("messageId", out _))
+            {
+                var envelope = JsonSerializer.Deserialize<IntegrationEventEnvelope>(body.Span)
+                    ?? throw new InvalidIntegrationEventException("Integration event envelope is empty.");
+                if (envelope.MessageId == Guid.Empty ||
+                    string.IsNullOrWhiteSpace(envelope.EventType) ||
+                    string.IsNullOrWhiteSpace(envelope.Version) ||
+                    !IntegrationEventContract.IsSupportedVersion(envelope.Version) ||
+                    string.IsNullOrWhiteSpace(envelope.CorrelationId) ||
+                    envelope.CorrelationId.Length > 128 ||
+                    envelope.OccurredAt == default ||
+                    envelope.Payload.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                {
+                    throw new InvalidIntegrationEventException("Integration event envelope is invalid.");
+                }
+                if (envelope.MessageId != transportMessageId ||
+                    !string.Equals(envelope.EventType, transportEventType, StringComparison.Ordinal) ||
+                    !string.IsNullOrWhiteSpace(transportVersion) &&
+                    !string.Equals(envelope.Version, transportVersion, StringComparison.Ordinal))
+                {
+                    throw new InvalidIntegrationEventException(
+                        "Integration event envelope does not match AMQP metadata.");
+                }
+
+                return new ParsedIntegrationEvent(
+                    envelope.MessageId,
+                    envelope.EventType,
+                    envelope.Version,
+                    envelope.OccurredAt,
+                    envelope.CorrelationId,
+                    Encoding.UTF8.GetBytes(envelope.Payload.GetRawText()));
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidIntegrationEventException(
+                "Integration event envelope is not valid JSON.",
+                exception);
+        }
+
+        var legacyCorrelationId = GetHeader(
+            headers,
+            IntegrationEventContract.CorrelationHeaderName);
+        return new ParsedIntegrationEvent(
+            transportMessageId,
+            transportEventType,
+            IntegrationEventContract.Version1,
+            DateTimeOffset.UtcNow,
+            string.IsNullOrWhiteSpace(legacyCorrelationId)
+                ? transportMessageId.ToString("N")
+                : legacyCorrelationId,
+            body);
+    }
+
+    private static string? GetHeader(IDictionary<string, object?>? headers, string name)
     {
         if (headers is null ||
-            !headers.TryGetValue(IntegrationEventContract.VersionHeaderName, out var value) ||
+            !headers.TryGetValue(name, out var value) ||
             value is null)
             return null;
 
@@ -158,6 +242,14 @@ public sealed class RabbitMqOrderConsumer(
             _ => value.ToString()
         };
     }
+
+    internal sealed record ParsedIntegrationEvent(
+        Guid MessageId,
+        string EventType,
+        string Version,
+        DateTimeOffset OccurredAt,
+        string CorrelationId,
+        ReadOnlyMemory<byte> Payload);
 
     private async Task DeclareTopologyAsync(IChannel channel, CancellationToken cancellationToken)
     {

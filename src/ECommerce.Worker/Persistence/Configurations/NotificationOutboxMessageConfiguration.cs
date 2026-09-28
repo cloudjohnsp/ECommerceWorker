@@ -16,6 +16,7 @@ public sealed class NotificationOutboxMessageConfiguration
         builder.Property(x => x.Subject).HasMaxLength(200).IsRequired();
         builder.Property(x => x.Body).IsRequired();
         builder.Property(x => x.LastError).HasMaxLength(2000);
+        builder.Property(x => x.CorrelationId).HasMaxLength(128).IsRequired();
         builder.HasIndex(x => x.SourceMessageId).IsUnique();
         builder.HasIndex(x => new { x.SentAt, x.NextAttemptAt, x.LockedUntil });
     }

@@ -115,6 +115,7 @@ public sealed class ApiOutboxPublisherPostgreSqlTests
                 "LockId" uuid NULL,
                 "LockedUntil" timestamp with time zone NULL,
                 "LastError" character varying(2000) NULL
+                ,"CorrelationId" character varying(128) NOT NULL
             );
             """, connection))
         {
@@ -126,9 +127,10 @@ public sealed class ApiOutboxPublisherPostgreSqlTests
         await using var insert = new NpgsqlCommand("""
             INSERT INTO public."OutboxMessages"
                 ("Id", "Type", "Payload", "CreatedAt", "Status", "Attempts",
-                 "NextAttemptAt", "LockId", "LockedUntil")
+                 "NextAttemptAt", "LockId", "LockedUntil", "CorrelationId")
             VALUES
-                (@id, 1, '{}', @createdAt, 1, @attempts, @nextAttemptAt, @lockId, @lockedUntil);
+                (@id, 1, '{}', @createdAt, 1, @attempts, @nextAttemptAt, @lockId, @lockedUntil,
+                 'integration-test');
             """, connection);
         insert.Parameters.AddWithValue("id", id);
         insert.Parameters.AddWithValue("createdAt", now.AddMinutes(-5));

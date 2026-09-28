@@ -27,7 +27,8 @@ public sealed class WorkerIntegrationEventOutboxProcessor(
                         message.Id,
                         message.Type,
                         message.Payload,
-                        message.CreatedAt),
+                        message.CreatedAt,
+                        message.CorrelationId),
                     cancellationToken);
                 message.MarkProcessed(DateTimeOffset.UtcNow);
                 WorkerTelemetry.PublishedEvents.Add(1);

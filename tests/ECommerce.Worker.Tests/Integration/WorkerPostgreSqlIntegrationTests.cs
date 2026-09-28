@@ -77,6 +77,8 @@ public sealed class WorkerPostgreSqlIntegrationTests
             "customer@example.com",
             "Pending",
             99.90m,
+            DateTimeOffset.UtcNow.AddMinutes(30),
+            null,
             DateTimeOffset.UtcNow,
             [new OrderIntegrationEventItem(Guid.NewGuid(), "Product", 99.90m, 1, 99.90m)]);
         var processor = new OrderIntegrationEventProcessor(context);

@@ -15,6 +15,7 @@ public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
     [
         IntegrationEventTypes.OrderCreated,
         IntegrationEventTypes.OrderUpdated,
+        IntegrationEventTypes.OrderDeleted,
         IntegrationEventTypes.OrderPaid,
         IntegrationEventTypes.PaymentFailed,
         IntegrationEventTypes.OrderRefunded,
@@ -25,7 +26,8 @@ public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
         Guid messageId,
         string eventType,
         ReadOnlyMemory<byte> body,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? correlationId = null)
     {
         if (messageId == Guid.Empty)
             throw new InvalidIntegrationEventException("Integration event message ID is required.");
@@ -87,7 +89,8 @@ public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
                     projection.CustomerEmail,
                     subject,
                     notificationBody,
-                    DateTimeOffset.UtcNow),
+                    DateTimeOffset.UtcNow,
+                    correlationId),
                 cancellationToken);
             await dbContext.ConsumedIntegrationEvents.AddAsync(
                 new ConsumedIntegrationEvent(messageId, eventType, DateTimeOffset.UtcNow),
@@ -146,6 +149,9 @@ public sealed class OrderIntegrationEventProcessor(WorkerDbContext dbContext)
             IntegrationEventTypes.OrderUpdated => (
                 $"Pedido {payload.OrderId} atualizado",
                 $"Um item foi adicionado ao pedido. Novo total: {payload.Total:C}."),
+            IntegrationEventTypes.OrderDeleted => (
+                $"Pedido {payload.OrderId} removido",
+                "O pedido foi removido."),
             IntegrationEventTypes.OrderPaid => (
                 $"Pagamento confirmado para o pedido {payload.OrderId}",
                 "Seu pagamento foi confirmado e a nota fiscal foi gerada."),

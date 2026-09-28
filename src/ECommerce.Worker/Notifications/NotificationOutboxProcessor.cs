@@ -61,7 +61,8 @@ public sealed class NotificationOutboxProcessor(
                     message.Id,
                     EmailSentIntegrationEventProcessor.EventType,
                     JsonSerializer.Serialize(payload),
-                    sentAt),
+                    sentAt,
+                    message.CorrelationId),
                 cancellationToken);
             WorkerTelemetry.SentNotifications.Add(1);
             await dbContext.SaveChangesAsync(cancellationToken);

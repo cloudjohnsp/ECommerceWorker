@@ -13,5 +13,7 @@ public sealed record OrderIntegrationEventPayload(
     string? CustomerEmail,
     string Status,
     decimal Total,
+    DateTimeOffset? ExpiresAt,
+    string? CancellationReason,
     DateTimeOffset OccurredAt,
     IReadOnlyCollection<OrderIntegrationEventItem> Items);

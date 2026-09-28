@@ -3,6 +3,7 @@ using ECommerce.Worker.Contracts;
 using ECommerce.Worker.Options;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
+using System.Text.Json;
 
 namespace ECommerce.Worker.Messaging;
 
@@ -38,8 +39,22 @@ public sealed class RabbitMqWorkerIntegrationEventPublisher(
             integrationEvent.Type,
             mandatory: true,
             properties,
-            Encoding.UTF8.GetBytes(integrationEvent.Payload),
+            CreateBody(integrationEvent),
             cancellationToken);
+    }
+
+    internal static byte[] CreateBody(WorkerIntegrationEvent integrationEvent)
+    {
+        using var payload = JsonDocument.Parse(integrationEvent.Payload);
+        var correlationId = NormalizeCorrelationId(integrationEvent);
+        var envelope = new IntegrationEventEnvelope(
+            integrationEvent.Id,
+            integrationEvent.Type,
+            integrationEvent.Version,
+            integrationEvent.OccurredAt,
+            correlationId,
+            payload.RootElement.Clone());
+        return JsonSerializer.SerializeToUtf8Bytes(envelope);
     }
 
     internal static BasicProperties CreateProperties(WorkerIntegrationEvent integrationEvent) => new()
@@ -52,9 +67,16 @@ public sealed class RabbitMqWorkerIntegrationEventPublisher(
         Headers = new Dictionary<string, object?>
         {
             [IntegrationEventContract.VersionHeaderName] =
-                Encoding.UTF8.GetBytes(IntegrationEventContract.Version1)
+                Encoding.UTF8.GetBytes(integrationEvent.Version),
+            [IntegrationEventContract.CorrelationHeaderName] =
+                Encoding.UTF8.GetBytes(NormalizeCorrelationId(integrationEvent))
         }
     };
+
+    private static string NormalizeCorrelationId(WorkerIntegrationEvent integrationEvent) =>
+        string.IsNullOrWhiteSpace(integrationEvent.CorrelationId)
+            ? integrationEvent.Id.ToString("N")
+            : integrationEvent.CorrelationId.Trim();
 
     public async ValueTask DisposeAsync()
     {

@@ -11,7 +11,8 @@ public sealed class NotificationOutboxMessage
         string recipient,
         string subject,
         string body,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        string? correlationId = null)
     {
         if (sourceMessageId == Guid.Empty)
             throw new ArgumentException("Source message ID is required.", nameof(sourceMessageId));
@@ -29,6 +30,9 @@ public sealed class NotificationOutboxMessage
         Body = body.Trim();
         CreatedAt = createdAt;
         NextAttemptAt = createdAt;
+        CorrelationId = string.IsNullOrWhiteSpace(correlationId)
+            ? sourceMessageId.ToString("N")
+            : correlationId.Trim();
     }
 
     public Guid Id { get; private set; }
@@ -42,6 +46,7 @@ public sealed class NotificationOutboxMessage
     public DateTimeOffset? SentAt { get; private set; }
     public int Attempts { get; private set; }
     public string? LastError { get; private set; }
+    public string CorrelationId { get; private set; } = string.Empty;
 
     public void Lock(DateTimeOffset lockedUntil) => LockedUntil = lockedUntil;
 

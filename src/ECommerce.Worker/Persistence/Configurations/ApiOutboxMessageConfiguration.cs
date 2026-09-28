@@ -15,5 +15,6 @@ public sealed class ApiOutboxMessageConfiguration : IEntityTypeConfiguration<Api
         builder.Property(message => message.CreatedAt).IsRequired();
         builder.Property(message => message.NextAttemptAt).IsRequired();
         builder.Property(message => message.LastError).HasMaxLength(2000);
+        builder.Property(message => message.CorrelationId).HasMaxLength(128).IsRequired();
     }
 }

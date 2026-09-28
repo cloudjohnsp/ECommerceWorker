@@ -145,6 +145,8 @@ public sealed class OrderIntegrationEventProcessorTests
         customerEmail,
         status,
         149.90m,
+        DateTimeOffset.UtcNow.AddMinutes(30),
+        null,
         DateTimeOffset.UtcNow,
         [new OrderIntegrationEventItem(Guid.NewGuid(), "Product", 149.90m, 1, 149.90m)]);
 }

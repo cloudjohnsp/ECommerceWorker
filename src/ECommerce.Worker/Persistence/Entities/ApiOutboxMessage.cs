@@ -22,6 +22,7 @@ public sealed class ApiOutboxMessage
         CreatedAt = createdAt;
         NextAttemptAt = createdAt;
         Status = PendingStatus;
+        CorrelationId = id.ToString("N");
     }
 
     public Guid Id { get; private set; }
@@ -36,6 +37,7 @@ public sealed class ApiOutboxMessage
     public Guid? LockId { get; private set; }
     public DateTimeOffset? LockedUntil { get; private set; }
     public string? LastError { get; private set; }
+    public string CorrelationId { get; private set; } = string.Empty;
 
     public string? GetEventType() => Type switch
     {

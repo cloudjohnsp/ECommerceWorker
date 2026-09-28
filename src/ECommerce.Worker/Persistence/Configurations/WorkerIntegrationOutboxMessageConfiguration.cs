@@ -17,6 +17,7 @@ public sealed class WorkerIntegrationOutboxMessageConfiguration
         builder.Property(message => message.CreatedAt).IsRequired();
         builder.Property(message => message.NextAttemptAt).IsRequired();
         builder.Property(message => message.LastError).HasMaxLength(2000);
+        builder.Property(message => message.CorrelationId).HasMaxLength(128).IsRequired();
         builder.HasIndex(message => new
         {
             message.ProcessedAt,

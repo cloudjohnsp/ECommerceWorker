@@ -1,74 +1,42 @@
 # Contratos de eventos de integração v1
 
-Os eventos publicados no exchange tópico `ecommerce.events` usam propriedades
-AMQP como envelope e JSON UTF-8 como payload.
+Cada mensagem publicada no exchange tópico durável `ecommerce.events` contém um
+envelope JSON camelCase. As propriedades AMQP repetem os campos usados para
+roteamento e validação:
 
-## Envelope AMQP
+| Envelope JSON | Propriedade AMQP | Regra |
+| --- | --- | --- |
+| `messageId` | `message_id` | GUID da mensagem de Outbox |
+| `eventType` | `type` e routing key | Nome estável do evento |
+| `version` | `x-contract-version` | `1` |
+| `occurredAt` | `timestamp` | UTC |
+| `correlationId` | `x-correlation-id` | correlação ponta a ponta, até 128 caracteres |
+| `payload` | corpo interno | DTO próprio do transporte |
 
-| Propriedade | Regra |
-| --- | --- |
-| `content_type` | `application/json` |
-| `message_id` | GUID único do Outbox |
-| `type` | Tipo do evento e routing key |
-| `timestamp` | Instante Unix de ocorrência |
-| `x-contract-version` | `1` |
+O consumer valida a igualdade entre envelope e metadados AMQP. Durante a
+convivência iniciada em 2026-09-27, mensagens legadas sem envelope continuam
+aceitas como v1; a retirada desse fallback exige telemetria sem mensagens
+legadas e um novo ADR.
 
-A ausência de `x-contract-version` é aceita temporariamente como v1 para drenar
-mensagens legadas. Qualquer outra versão é rejeitada e segue a política de DLQ.
+## Routing keys e payloads
 
-## Eventos de pedido v1
+- `order.created`, `order.updated`, `order.deleted`, `order.paid`, `payment.failed`,
+  `order.refunded` e `order.cancelled` usam `OrderIntegrationEventPayload`.
+  `order.paid` é o equivalente interno de `PaymentCompleted`; o webhook externo
+  correspondente é `payment.approved`.
+- `stock.updated` usa `StockUpdatedIntegrationEventPayload`.
+- `email.sent` usa `EmailSentIntegrationEventPayload`, sem destinatário, nome,
+  corpo ou token.
 
-Tipos: `order.created`, `order.updated`, `order.paid`, `payment.failed`,
-`order.refunded` e `order.cancelled`.
+O contrato canônico completo de `order.paid` está em
+[`contracts/v1/order-paid.example.json`](contracts/v1/order-paid.example.json).
+O payload de pedido contém `OrderId`, `CustomerId`, `CustomerEmail`, `Status`,
+`Total`, `ExpiresAt`, `CancellationReason`, `OccurredAt` e `Items`. O payload de
+estoque contém `ProductId`, `AvailableStock`, `OrderId`, `Reason` e
+`OccurredAt`. O payload de e-mail contém `DeliveryId`, `Category` e
+`OccurredAt`.
 
-Todos usam `OrderIntegrationEventPayload`:
-
-```json
-{
-  "OrderId": "11111111-1111-1111-1111-111111111111",
-  "CustomerId": "22222222-2222-2222-2222-222222222222",
-  "CustomerEmail": "customer@example.com",
-  "Status": "PendingPayment",
-  "Total": 99.90,
-  "OccurredAt": "2026-09-27T12:00:00+00:00",
-  "Items": [
-    {
-      "ProductId": "33333333-3333-3333-3333-333333333333",
-      "ProductName": "Product",
-      "UnitPrice": 99.90,
-      "Quantity": 1,
-      "Subtotal": 99.90
-    }
-  ]
-}
-```
-
-## Estoque v1
-
-O tipo `stock.updated` usa `StockUpdatedIntegrationEventPayload`:
-
-```json
-{
-  "ProductId": "33333333-3333-3333-3333-333333333333",
-  "AvailableStock": 9,
-  "OrderId": "11111111-1111-1111-1111-111111111111",
-  "Reason": "reserved",
-  "OccurredAt": "2026-09-27T12:00:00+00:00"
-}
-```
-
-## Entrega de e-mail v1
-
-O tipo `email.sent` usa `EmailSentIntegrationEventPayload` e não contém endereço,
-nome, conteúdo ou token:
-
-```json
-{
-  "DeliveryId": "44444444-4444-4444-4444-444444444444",
-  "Category": "email_confirmation",
-  "OccurredAt": "2026-09-27T12:00:00+00:00"
-}
-```
-
-Campos e semântica desta versão são imutáveis. Uma alteração incompatível exige
-uma nova versão do contrato e período explícito de convivência.
+Esta versão é imutável. Campos novos compatíveis devem ser opcionais e
+consumers ignoram campos desconhecidos. Mudança incompatível cria uma nova
+versão e exige período explícito de publicação/consumo simultâneos antes da
+retirada da versão anterior.

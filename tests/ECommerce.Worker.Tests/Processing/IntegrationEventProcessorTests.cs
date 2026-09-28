@@ -42,17 +42,22 @@ public sealed class IntegrationEventProcessorTests
             "customer@example.com",
             "Pending",
             99.90m,
+            DateTimeOffset.UtcNow.AddMinutes(30),
+            null,
             DateTimeOffset.UtcNow,
             [new OrderIntegrationEventItem(Guid.NewGuid(), "Product", 99.90m, 1, 99.90m)]);
 
         var result = await processor.ProcessAsync(
             Guid.NewGuid(),
             "order.created",
-            JsonSerializer.SerializeToUtf8Bytes(payload));
+            JsonSerializer.SerializeToUtf8Bytes(payload),
+            correlationId: "checkout-123");
 
         result.Should().Be(IntegrationEventProcessingResult.Processed);
         (await context.OrderProjections.SingleAsync()).OrderId.Should().Be(payload.OrderId);
         (await context.InventoryProjections.CountAsync()).Should().Be(0);
+        (await context.NotificationOutboxMessages.SingleAsync()).CorrelationId
+            .Should().Be("checkout-123");
     }
 
     [Fact]

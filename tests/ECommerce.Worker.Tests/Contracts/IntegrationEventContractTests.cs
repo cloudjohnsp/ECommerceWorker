@@ -32,6 +32,8 @@ public sealed class IntegrationEventContractTests
             "customer@example.com",
             "PendingPayment",
             99.90m,
+            DateTimeOffset.Parse("2026-09-27T12:30:00+00:00"),
+            null,
             DateTimeOffset.Parse("2026-09-27T12:00:00+00:00"),
             [new OrderIntegrationEventItem(
                 Guid.Parse("33333333-3333-3333-3333-333333333333"),
@@ -48,6 +50,8 @@ public sealed class IntegrationEventContractTests
                 "CustomerEmail",
                 "Status",
                 "Total",
+                "ExpiresAt",
+                "CancellationReason",
                 "OccurredAt",
                 "Items");
         document.RootElement.GetProperty("Items")[0]

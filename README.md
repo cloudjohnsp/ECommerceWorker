@@ -36,6 +36,12 @@ O processamento oferece:
 8. publicação da Outbox de integração da API com claim PostgreSQL concorrente,
    lease, backoff e publisher confirms.
 
+Todo evento novo usa o envelope v1 com `messageId`, `eventType`, `version`,
+`occurredAt`, `correlationId` e `payload`. O consumer valida o envelope contra
+os metadados AMQP e inclui a correlação nos logs e traces. Routing keys, schemas,
+compatibilidade legada e evolução estão em
+[`docs/integration-events-v1.md`](docs/integration-events-v1.md).
+
 Inbox, projeções, nota e intenção de notificação são confirmadas antes do ACK.
 Mensagens inválidas são rejeitadas para a DLQ; falhas transitórias são
 reenfileiradas até o limite configurado pelo RabbitMQ.

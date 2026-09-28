@@ -32,6 +32,7 @@ public sealed class NotificationOutboxProcessorTests
         var sentEvent = await context.IntegrationOutboxMessages.SingleAsync();
         sentEvent.Id.Should().Be(message.Id);
         sentEvent.Type.Should().Be("email.sent");
+        sentEvent.CorrelationId.Should().Be("checkout-123");
         var payload = JsonSerializer.Deserialize<EmailSentIntegrationEventPayload>(sentEvent.Payload);
         payload!.DeliveryId.Should().Be(message.Id);
         payload.Category.Should().Be(EmailDeliveryCategories.OrderNotification);
@@ -106,7 +107,8 @@ public sealed class NotificationOutboxProcessorTests
         "customer@example.com",
         "Subject",
         "Body",
-        DateTimeOffset.UtcNow.AddSeconds(-1));
+        DateTimeOffset.UtcNow.AddSeconds(-1),
+        "checkout-123");
 
     private sealed class RecordingEmailSender : IOrderEmailSender
     {

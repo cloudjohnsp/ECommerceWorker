@@ -9,13 +9,19 @@ public sealed class IntegrationEventProcessor(
         Guid messageId,
         string eventType,
         ReadOnlyMemory<byte> body,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        string? correlationId = null) =>
         eventType switch
         {
             StockIntegrationEventProcessor.EventType =>
                 stockProcessor.ProcessAsync(messageId, eventType, body, cancellationToken),
             EmailSentIntegrationEventProcessor.EventType =>
                 emailProcessor.ProcessAsync(messageId, eventType, body, cancellationToken),
-            _ => orderProcessor.ProcessAsync(messageId, eventType, body, cancellationToken)
+            _ => orderProcessor.ProcessAsync(
+                messageId,
+                eventType,
+                body,
+                cancellationToken,
+                correlationId)
         };
 }

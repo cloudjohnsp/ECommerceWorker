@@ -10,7 +10,8 @@ public sealed class WorkerIntegrationOutboxMessage
         Guid id,
         string type,
         string payload,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        string? correlationId = null)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("Message ID is required.", nameof(id));
@@ -24,6 +25,9 @@ public sealed class WorkerIntegrationOutboxMessage
         Payload = payload;
         CreatedAt = createdAt;
         NextAttemptAt = createdAt;
+        CorrelationId = string.IsNullOrWhiteSpace(correlationId)
+            ? id.ToString("N")
+            : correlationId.Trim();
     }
 
     public Guid Id { get; private set; }
@@ -35,6 +39,7 @@ public sealed class WorkerIntegrationOutboxMessage
     public DateTimeOffset? ProcessedAt { get; private set; }
     public int Attempts { get; private set; }
     public string? LastError { get; private set; }
+    public string CorrelationId { get; private set; } = string.Empty;
 
     public void Lock(DateTimeOffset lockedUntil) => LockedUntil = lockedUntil;
 

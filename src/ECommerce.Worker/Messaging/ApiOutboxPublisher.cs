@@ -26,7 +26,12 @@ public sealed class ApiOutboxPublisher(
                 var eventType = message.GetEventType()
                     ?? throw new InvalidOperationException($"Unsupported API outbox type {message.Type}.");
                 await publisher.PublishAsync(
-                    new WorkerIntegrationEvent(message.Id, eventType, message.Payload, message.CreatedAt),
+                    new WorkerIntegrationEvent(
+                        message.Id,
+                        eventType,
+                        message.Payload,
+                        message.CreatedAt,
+                        message.CorrelationId),
                     cancellationToken);
                 await MarkProcessedAsync(message, lockId, cancellationToken);
             }
