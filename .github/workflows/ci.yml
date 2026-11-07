@@ -29,5 +29,5 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Run local-equivalent Worker gate
-        shell: pwsh
-        run: ./scripts/verify-local.ps1 -Configuration Release
+        shell: bash
+        run: bash ./scripts/verify-local.sh --configuration Release

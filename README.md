@@ -144,8 +144,8 @@ RUN_POSTGRES_INTEGRATION_TESTS=true dotnet test ECommerceWorker.slnx
 O gate local equivalente ao CI executa restore, formato, build, integrações
 PostgreSQL e build da imagem sem publicá-la:
 
-```powershell
-.\scripts\verify-local.ps1
+```bash
+bash ./scripts/verify-local.sh
 ```
 
 A imagem usa a tag `sha-<commit>`; em um worktree com alterações, a tag recebe
